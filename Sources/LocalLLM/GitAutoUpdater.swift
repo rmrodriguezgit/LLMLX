@@ -52,7 +52,11 @@ final class GitAutoUpdater {
 
     var status: UpdaterStatus { statusBox.get() }
     private var cfg: UpdaterConfig { app.config.current.updater }
-    private var remote: String { AppEnvironment.bundledRemote.flatMap { $0.isEmpty ? nil : $0 } ?? cfg.remote }
+    /// LOCALLLM_GIT_REMOTE (staging/dev override) > remote baked into Info.plist by build_dmg.sh > profiles.json.
+    private var remote: String {
+        if let e = ProcessInfo.processInfo.environment["LOCALLLM_GIT_REMOTE"], !e.isEmpty { return e }
+        return AppEnvironment.bundledRemote.flatMap { $0.isEmpty ? nil : $0 } ?? cfg.remote
+    }
 
     private func update(_ body: (inout UpdaterStatus) -> Void) {
         let s = statusBox.mutate { s -> UpdaterStatus in body(&s); return s }

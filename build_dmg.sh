@@ -112,7 +112,17 @@ if [[ -n "${OLLAMA_BIN:-}" ]]; then
   SRC_DIR="$(dirname "$REAL")"
   cp "$REAL" "$OLLAMA_DIR/ollama"
   # Runner libraries (ggml/metal) live next to the binary in lib/ for recent releases.
-  [[ -d "$SRC_DIR/lib" ]] && cp -R "$SRC_DIR/lib" "$OLLAMA_DIR/lib"
+  if [[ -d "$SRC_DIR/lib" ]]; then
+    cp -R "$SRC_DIR/lib" "$OLLAMA_DIR/lib"
+    # Package managers (Homebrew) symlink into their prefix: materialise every symlink so the
+    # bundle is self-contained (codesign rejects links that point outside the bundle).
+    while IFS= read -r -d '' link; do
+      rel="${link#"$OLLAMA_DIR/lib/"}"
+      target="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$SRC_DIR/lib/$rel")"
+      rm -f "$link"
+      if [[ -f "$target" ]]; then cp "$target" "$link"; else log "Skipping dangling link lib/$rel"; fi
+    done < <(find "$OLLAMA_DIR/lib" -type l -print0)
+  fi
 else
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT

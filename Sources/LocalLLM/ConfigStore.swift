@@ -155,8 +155,10 @@ final class ConfigStore {
     /// Re-reads the configuration from disk. On failure the previous configuration stays active.
     @discardableResult
     func reload() throws -> (old: RemoteConfig, new: RemoteConfig) {
-        let url = AppPaths.repo.appendingPathComponent("config/profiles.json")
-        let target = FileManager.default.fileExists(atPath: url.path) ? url : (ConfigStore.candidateURLs.first { FileManager.default.fileExists(atPath: $0.path) } ?? url)
+        // Same precedence as startup: LOCALLLM_CONFIG > Git repo > bundle.
+        guard let target = ConfigStore.candidateURLs.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            throw ConfigError.invalid("no profiles.json found")
+        }
         let new = try ConfigStore.parse(Data(contentsOf: target))
         let old = state.mutate { s -> RemoteConfig in
             let o = s.config
