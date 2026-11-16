@@ -178,7 +178,462 @@ curl -X POST http://127.0.0.1:11500/v1/system/git-sync
 
 ---
 
-## 5. Compilar y empaquetar
+## 5. Cómo usarlo desde otras apps
+
+LocalLLM expone dos APIs en `http://127.0.0.1:11500`:
+
+| API | Base URL | Úsala con |
+|---|---|---|
+| OpenAI compatible | `http://127.0.0.1:11500/v1` | SDK `openai` (Python/JS), LangChain, Vercel AI SDK, IDEs, cualquier cliente "OpenAI-compatible" |
+| Ollama nativa | `http://127.0.0.1:11500` | librerías `ollama` (Python/JS), apps que ya hablan con Ollama |
+
+Reglas comunes a todos los lenguajes:
+
+- **API key**: no hace falta. Los SDK exigen que haya una, así que pon cualquier valor, por ejemplo `"local"`.
+- **Modelo**: usa `"default"`, `"local"` o cualquier alias de `routing.aliases`, como `gpt-4o`. Todos van al modelo que la app eligió para tu Mac (`qwen3:8b` en un M3 de 16 GB). Si pides el nombre exacto de un modelo instalado (`qwen2.5:7b`), se usa ese.
+- **`X-Client-App: nombre-de-tu-app`**: la recomiendo. Así tus peticiones aparecen separadas en `GET /v1/metrics`.
+- **`X-Priority: high | normal | low`**: es opcional. Usa `high` en la UI interactiva y `low` en los trabajos batch.
+- **Errores a manejar**:
+
+  | Código | Cuándo pasa | Qué hacer |
+  |---|---|---|
+  | `429` + `Retry-After` | Poca RAM (circuit breaker) o cola llena | Reintentar tras esos segundos |
+  | `503` | Ningún slot quedó libre a tiempo | Reintentar |
+  | `403` | Petición web desde un `Origin` no permitido | Ver [Apps web](#react--vue--apps-web-en-el-navegador) |
+
+- **Variables de entorno**: los SDK oficiales de OpenAI leen estas dos. Con ellas muchas herramientas funcionan sin tocar código:
+
+  ```bash
+  export OPENAI_BASE_URL=http://127.0.0.1:11500/v1
+  export OPENAI_API_KEY=local
+  ```
+
+- **Comprobar que está corriendo**: `GET /health` devuelve `{"status":"ok", "model": ..., "engine": ...}`.
+
+### Python
+
+```bash
+pip install openai        # o: pip install ollama / langchain-openai / httpx
+```
+
+**SDK de OpenAI (streaming):**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:11500/v1",
+    api_key="local",
+    default_headers={"X-Client-App": "mi-script-python", "X-Priority": "high"},
+    max_retries=3,            # el SDK ya reintenta 429/503 respetando Retry-After
+)
+
+stream = client.chat.completions.create(
+    model="default",
+    messages=[{"role": "user", "content": "Explícame qué es la memoria unificada"}],
+    stream=True,
+)
+for chunk in stream:
+    if chunk.choices and chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+**Async + concurrencia** (el gateway encola y prioriza; no hace falta limitar en el cliente):
+
+```python
+import asyncio
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(base_url="http://127.0.0.1:11500/v1", api_key="local",
+                     default_headers={"X-Client-App": "batch-worker", "X-Priority": "low"})
+
+async def ask(q: str) -> str:
+    r = await client.chat.completions.create(model="default", messages=[{"role": "user", "content": q}])
+    return r.choices[0].message.content
+
+async def main():
+    answers = await asyncio.gather(*(ask(f"Resume el tema {i}") for i in range(10)))
+    print(answers)
+
+asyncio.run(main())
+```
+
+**Librería `ollama` (API nativa, con tiempos exactos del motor):**
+
+```python
+from ollama import Client
+
+client = Client(host="http://127.0.0.1:11500", headers={"X-Client-App": "mi-script-ollama"})
+for part in client.chat(model="default", messages=[{"role": "user", "content": "Hola"}], stream=True):
+    print(part["message"]["content"], end="", flush=True)
+```
+
+**LangChain:**
+
+```python
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(base_url="http://127.0.0.1:11500/v1", api_key="local", model="default",
+                 default_headers={"X-Client-App": "langchain-agent"})
+print(llm.invoke("¿Qué es RAG?").content)
+```
+
+**Embeddings** (necesitas un modelo de embeddings instalado, por ejemplo `ollama pull nomic-embed-text`):
+
+```python
+emb = client.embeddings.create(model="nomic-embed-text", input=["hola mundo"])  # cliente OpenAI de arriba
+```
+
+### Node.js (y Bun / Deno)
+
+```bash
+npm install openai        # o: npm install ollama / ai @ai-sdk/openai-compatible
+```
+
+**SDK de OpenAI:**
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:11500/v1",
+  apiKey: "local",
+  defaultHeaders: { "X-Client-App": "mi-api-node" },
+  maxRetries: 3,
+});
+
+const stream = await client.chat.completions.create({
+  model: "default",
+  messages: [{ role: "user", content: "Escribe un haiku sobre Apple Silicon" }],
+  stream: true,
+});
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
+}
+```
+
+**Librería `ollama`:**
+
+```js
+import { Ollama } from "ollama";
+
+const ollama = new Ollama({ host: "http://127.0.0.1:11500", headers: { "X-Client-App": "mi-api-node" } });
+const res = await ollama.chat({ model: "default", messages: [{ role: "user", content: "Hola" }] });
+console.log(res.message.content, `${res.eval_count} tokens`);
+```
+
+**Vercel AI SDK** (Next.js, Express, etc.):
+
+```js
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { streamText } from "ai";
+
+const localllm = createOpenAICompatible({
+  name: "localllm",
+  baseURL: "http://127.0.0.1:11500/v1",
+  headers: { "X-Client-App": "next-app" },
+});
+
+const result = streamText({ model: localllm("default"), prompt: "Dame 3 ideas de nombres" });
+for await (const text of result.textStream) process.stdout.write(text);
+```
+
+**Sin dependencias (`fetch` + SSE)**: sirve también para Node 18+, Deno, Bun, Cloudflare Workers locales, etc.
+
+```js
+export async function* chatStream(messages, { model = "default", signal, app = "fetch-client" } = {}) {
+  const res = await fetch("http://127.0.0.1:11500/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Client-App": app },
+    body: JSON.stringify({ model, messages, stream: true }),
+    signal,
+  });
+  if (res.status === 429 || res.status === 503) {
+    const wait = Number(res.headers.get("Retry-After") ?? 2);
+    throw Object.assign(new Error(`LocalLLM ocupado, reintenta en ${wait}s`), { retryAfter: wait });
+  }
+  if (!res.ok) throw new Error(`LocalLLM ${res.status}: ${await res.text()}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop();                       // línea incompleta para la próxima vuelta
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice(6).trim();
+      if (data === "[DONE]") return;
+      const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+      if (delta) yield delta;
+    }
+  }
+}
+
+// uso
+for await (const t of chatStream([{ role: "user", content: "Hola" }])) process.stdout.write(t);
+```
+
+### Electron
+
+Haz las llamadas desde el **proceso main**, porque ahí no aplica CORS. Al renderer pásale el texto por IPC.
+
+```js
+// main.js
+import { app, BrowserWindow, ipcMain } from "electron";
+import OpenAI from "openai";
+
+const llm = new OpenAI({ baseURL: "http://127.0.0.1:11500/v1", apiKey: "local",
+                         defaultHeaders: { "X-Client-App": "mi-electron-app", "X-Priority": "high" } });
+const controllers = new Map();
+
+ipcMain.handle("llm:chat", async (event, { id, messages }) => {
+  const controller = new AbortController();
+  controllers.set(id, controller);
+  try {
+    const stream = await llm.chat.completions.create(
+      { model: "default", messages, stream: true }, { signal: controller.signal });
+    for await (const chunk of stream) {
+      const t = chunk.choices[0]?.delta?.content;
+      if (t) event.sender.send(`llm:token:${id}`, t);
+    }
+  } finally {
+    controllers.delete(id);
+    event.sender.send(`llm:done:${id}`);
+  }
+});
+ipcMain.on("llm:cancel", (_e, id) => controllers.get(id)?.abort());   // libera el slot en el gateway
+```
+
+```js
+// preload.js
+import { contextBridge, ipcRenderer } from "electron";
+
+contextBridge.exposeInMainWorld("llm", {
+  chat(messages, onToken) {
+    const id = crypto.randomUUID();
+    return new Promise((resolve) => {
+      ipcRenderer.on(`llm:token:${id}`, (_e, t) => onToken(t));
+      ipcRenderer.once(`llm:done:${id}`, () => { ipcRenderer.removeAllListeners(`llm:token:${id}`); resolve(); });
+      ipcRenderer.invoke("llm:chat", { id, messages });
+    });
+  },
+});
+```
+
+```js
+// renderer (React, Vue o vanilla)
+await window.llm.chat([{ role: "user", content: "Hola" }], (t) => (output.textContent += t));
+```
+
+El renderer también puede llamar al gateway directamente, porque los orígenes `file://`, `app://` y `http://localhost:*` están permitidos. Aun así, pasar por main evita problemas de CSP y de CORS.
+
+### React / Vue / apps web en el navegador
+
+En el navegador entra en juego CORS. El gateway solo acepta peticiones con `Origin` de la lista `gateway.allowedOrigins` de `config/profiles.json`. Por defecto la lista incluye `http://localhost:*` y `http://127.0.0.1:*`, así que los servidores de desarrollo (Vite, Next.js, CRA) funcionan sin configurar nada.
+
+Si tu web se sirve desde otro dominio, añádelo a esa lista, por ejemplo `"https://intranet.miempresa.com"`, y haz push a este repo. La app lo recarga en caliente en menos de 15 minutos, o al momento con "Sincronizar Git Ahora". No uses `"*"`: dejaría que cualquier web que abras use tu LLM local.
+
+Otra opción es un proxy en el servidor de desarrollo. Con él el navegador ve el mismo origen y no aplica CORS:
+
+```js
+// vite.config.js
+export default {
+  server: { proxy: { "/llm": { target: "http://127.0.0.1:11500", rewrite: (p) => p.replace(/^\/llm/, "") } } },
+};
+// y en el código usa baseURL "/llm/v1"
+```
+
+**React — hook de streaming con cancelación:**
+
+```jsx
+import { useCallback, useRef, useState } from "react";
+
+const BASE = "http://127.0.0.1:11500/v1";   // o "/llm/v1" con el proxy de Vite
+
+export function useLocalLLM({ app = "mi-react-app" } = {}) {
+  const [text, setText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const abortRef = useRef(null);
+
+  const send = useCallback(async (messages) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setText(""); setError(null); setLoading(true);
+    try {
+      const res = await fetch(`${BASE}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Client-App": app, "X-Priority": "high" },
+        body: JSON.stringify({ model: "default", messages, stream: true }),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(res.status === 429
+        ? `Sin memoria libre, reintenta en ${res.headers.get("Retry-After")}s` : `Error ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith("data: ") || line.includes("[DONE]")) continue;
+          const delta = JSON.parse(line.slice(6)).choices?.[0]?.delta?.content;
+          if (delta) setText((t) => t + delta);
+        }
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [app]);
+
+  const stop = useCallback(() => abortRef.current?.abort(), []);
+  return { text, loading, error, send, stop };
+}
+
+// uso
+export default function Chat() {
+  const { text, loading, error, send, stop } = useLocalLLM();
+  return (
+    <div>
+      <button onClick={() => send([{ role: "user", content: "Cuéntame un chiste" }])}>Enviar</button>
+      {loading && <button onClick={stop}>Detener</button>}
+      {error && <p style={{ color: "red" }}>{error}</p>}
+      <pre>{text}</pre>
+    </div>
+  );
+}
+```
+
+**Vue 3 — composable:**
+
+```js
+// useLocalLLM.js
+import { ref } from "vue";
+
+export function useLocalLLM(app = "mi-vue-app") {
+  const text = ref(""), loading = ref(false), error = ref(null);
+  let controller = null;
+
+  async function send(messages) {
+    controller?.abort();
+    controller = new AbortController();
+    text.value = ""; error.value = null; loading.value = true;
+    try {
+      const res = await fetch("http://127.0.0.1:11500/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Client-App": app },
+        body: JSON.stringify({ model: "default", messages, stream: true }),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`LocalLLM ${res.status}`);
+      const reader = res.body.getReader(), decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (const l of lines) {
+          if (!l.startsWith("data: ") || l.includes("[DONE]")) continue;
+          text.value += JSON.parse(l.slice(6)).choices?.[0]?.delta?.content ?? "";
+        }
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") error.value = e.message;
+    } finally {
+      loading.value = false;
+    }
+  }
+  return { text, loading, error, send, stop: () => controller?.abort() };
+}
+```
+
+```vue
+<script setup>
+import { useLocalLLM } from "./useLocalLLM";
+const { text, loading, error, send, stop } = useLocalLLM();
+</script>
+
+<template>
+  <button @click="send([{ role: 'user', content: 'Hola' }])">Enviar</button>
+  <button v-if="loading" @click="stop">Detener</button>
+  <p v-if="error" class="error">{{ error }}</p>
+  <pre>{{ text }}</pre>
+</template>
+```
+
+Lo mismo vale para Svelte, Angular, Solid o JavaScript sin framework: basta con `fetch` y el mismo parseo de líneas `data:`. También puedes usar el SDK `openai` en el navegador con `dangerouslyAllowBrowser: true`. Ese flag existe para proteger API keys reales; aquí la key es ficticia, así que no expone nada.
+
+### Swift (macOS / iOS Simulator)
+
+```swift
+var req = URLRequest(url: URL(string: "http://127.0.0.1:11500/v1/chat/completions")!)
+req.httpMethod = "POST"
+req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+req.setValue("mi-app-swift", forHTTPHeaderField: "X-Client-App")
+req.httpBody = try JSONSerialization.data(withJSONObject: [
+    "model": "default", "stream": true,
+    "messages": [["role": "user", "content": "Hola"]]
+])
+let (bytes, _) = try await URLSession.shared.bytes(for: req)
+for try await line in bytes.lines where line.hasPrefix("data: ") && !line.contains("[DONE]") {
+    let obj = try JSONSerialization.jsonObject(with: Data(line.dropFirst(6).utf8)) as? [String: Any]
+    let delta = ((obj?["choices"] as? [[String: Any]])?.first?["delta"] as? [String: Any])?["content"] as? String
+    print(delta ?? "", terminator: "")
+}
+```
+
+Una app con sandbox necesita el entitlement `com.apple.security.network.client`.
+
+### IDEs, agentes y herramientas
+
+Cualquier herramienta con opción "OpenAI compatible" o "Ollama" funciona con estos valores:
+
+| Campo | Valor |
+|---|---|
+| Base URL / API base | `http://127.0.0.1:11500/v1` (OpenAI) o `http://127.0.0.1:11500` (Ollama) |
+| API key | `local` |
+| Modelo | `default` |
+
+Ejemplo para **Continue** (VS Code / JetBrains), en `~/.continue/config.yaml`:
+
+```yaml
+models:
+  - name: LocalLLM (M3)
+    provider: openai
+    model: default
+    apiBase: http://127.0.0.1:11500/v1
+    apiKey: local
+    requestOptions:
+      headers:
+        X-Client-App: continue
+        X-Priority: high
+```
+
+Si una herramienta solo permite Ollama en el puerto por defecto, define `OLLAMA_HOST=http://127.0.0.1:11500` antes de lanzarla.
+
+### Ver lo que consume cada app
+
+```bash
+curl -s "http://127.0.0.1:11500/v1/metrics?window=24h" | python3 -m json.tool
+```
+
+`byClient` agrupa por `X-Client-App`: peticiones, tokens de entrada y salida, tok/s medio y TTFT medio. `recent` muestra las últimas 25 peticiones.
+
+---
+
+## 6. Compilar y empaquetar
 
 Requisitos: macOS 13 o superior en Apple Silicon y Xcode Command Line Tools (`xcode-select --install`).
 
@@ -200,7 +655,7 @@ El DMG firmado ad-hoc (por defecto) sirve para tus propios Macs. Para distribuir
 
 ---
 
-## 6. Notas y límites conocidos
+## 7. Notas y límites conocidos
 
 - **Purga de KV-cache**: Ollama no tiene API para vaciar solo el KV-cache. Cuando salta el breaker y no hay generaciones en curso, el gateway descarga el modelo (`keep_alive: 0`), lo que libera pesos y KV. Si hay generaciones activas, la purga espera a que terminen. La siguiente petición vuelve a cargar el modelo (~1–3 s).
 - **RAM disponible** = libre + especulativa + purgable + caché de archivos. Es una medida conservadora: no cuenta las páginas anónimas inactivas, que solo se recuperan comprimiendo o paginando a swap.

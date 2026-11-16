@@ -211,9 +211,12 @@ final class InferenceGateway {
         }
         let cors = corsHeaders(req)
         if req.method == .OPTIONS {
+            // Echo the requested headers: browser SDKs (openai-js, ai-sdk) add their own x-* headers.
+            let requested = req.headers.first(name: "Access-Control-Request-Headers")
+            let allowHeaders = (requested?.isEmpty == false) ? requested! : "Authorization, Content-Type, X-Client-App, X-Priority"
             await w.send(status: .noContent, headers: cors + [
                 ("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"),
-                ("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Client-App, X-Priority"),
+                ("Access-Control-Allow-Headers", allowHeaders),
                 ("Access-Control-Max-Age", "86400")], body: Data())
             return
         }
@@ -248,7 +251,8 @@ final class InferenceGateway {
 
     private func corsHeaders(_ req: GatewayRequest) -> [(String, String)] {
         guard let origin = req.headers.first(name: "Origin") else { return [] }
-        return [("Access-Control-Allow-Origin", origin), ("Vary", "Origin")]
+        return [("Access-Control-Allow-Origin", origin), ("Vary", "Origin"),
+                ("Access-Control-Expose-Headers", "X-LocalLLM-Model, X-LocalLLM-Queue-Ms, Retry-After")]
     }
 
     static func clientApp(_ headers: HTTPHeaders) -> String {
