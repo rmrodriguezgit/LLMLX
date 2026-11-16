@@ -310,6 +310,7 @@ struct MenuContentView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(s.gatewayURL + "/v1", forType: .string)
                 }
+                Button("Chat") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/chat")!) }
                 Button("Métricas") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/metricas")!) }
                 Button("Memoria") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/memoria")!) }
                 Button("Perfil") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/perfil")!) }

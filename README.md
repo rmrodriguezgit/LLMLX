@@ -8,7 +8,7 @@ Está calibrada para un **Apple M3 con 16 GB** de memoria unificada y escala de 
 
 **Accesos rápidos:**
 - [Instalar o actualizar la app](#0-instalar-o-actualizar-la-app)
-- [Panel web](#panel-web-métricas-memoria-perfil)
+- [Panel web](#panel-web-chat-métricas-memoria-perfil)
 - [¿Para qué sirve Git aquí?](#para-qué-sirve-la-parte-de-git)
 - [Cómo usarlo desde tus apps](#5-cómo-usarlo-desde-otras-apps)
 
@@ -61,12 +61,13 @@ Normalmente basta con `git push` a este repo. La app instalada revisa GitHub cad
 - Cambian `Info.plist` o el icono.
 - El Mac no tiene Xcode Command Line Tools y por tanto no puede recompilar solo.
 
-### Panel web (métricas, memoria, perfil)
+### Panel web (chat, métricas, memoria, perfil)
 
-Ábrelo en `http://127.0.0.1:11500/dashboard/`, o con los botones **Métricas / Memoria / Perfil** del menú. Es una app TypeScript sin dependencias en tiempo de ejecución, con tema claro y oscuro:
+Ábrelo en `http://127.0.0.1:11500/dashboard/`, o con los botones **Chat / Métricas / Memoria / Perfil** del menú. Es una app TypeScript sin dependencias en tiempo de ejecución, con tema claro y oscuro:
 
 | Sección | Qué muestra |
 |---|---|
+| **Chat** | Chat tipo ChatGPT con el modelo local: historial de conversaciones a la izquierda (agrupado por fecha, búsqueda, renombrar, eliminar), streaming con fase en vivo (procesando prompt / razonando / escribiendo), razonamiento plegable, selector de modelo, instrucciones del sistema, detener, regenerar, editar y reenviar. Cada respuesta muestra tok/s, TTFT, tokens de entrada y salida, duración y un desglose (cola, carga del modelo, evaluación del prompt, generación). Las conversaciones se guardan en el navegador |
 | **Métricas** | Peticiones, tokens de entrada y salida, tok/s, TTFT p50/p95, rechazos; gráficas por intervalo (1 h, 24 h, 7 d, 30 d); uso por modelo y por app; últimas peticiones; incidentes |
 | **Memoria** | Composición en vivo (pesos / KV-cache / macOS / libre) con la línea del umbral del breaker; RAM disponible y swap de los últimos 15 min; modelos cargados en Metal |
 | **Perfil de hardware** | Chip, núcleos CPU/GPU, RAM, plan elegido y su justificación, presupuesto Metal, variables de Ollama y **selector de modelo** |

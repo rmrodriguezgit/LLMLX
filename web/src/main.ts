@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { chatView } from "./views/chat";
 import { hideTooltip } from "./charts";
 import { esc } from "./format";
 import { errorBox, pill } from "./ui";
@@ -9,12 +10,13 @@ import { systemView } from "./views/system";
 import type { View } from "./views/view";
 
 const ROUTES: Record<string, { view: View; icon: string; label: string }> = {
+  chat: { view: chatView, label: "Chat", icon: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>' },
   metricas: { view: metricsView, label: "Métricas", icon: '<path d="M4 19V10M10 19V5M16 19v-7M22 19H2"/>' },
   memoria: { view: memoryView, label: "Memoria", icon: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10v4M11 10v4M15 10v4M19 10v4"/>' },
   perfil: { view: profileView, label: "Perfil de hardware", icon: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>' },
   sistema: { view: systemView, label: "Actualizaciones", icon: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>' },
 };
-const ALIASES: Record<string, string> = { metrics: "metricas", profile: "perfil", memory: "memoria", system: "sistema" };
+const ALIASES: Record<string, string> = { conversaciones: "chat", metrics: "metricas", profile: "perfil", memory: "memoria", system: "sistema" };
 
 const app = document.getElementById("app")!;
 let timer: number | undefined;
@@ -65,7 +67,10 @@ async function render(now = false): Promise<void> {
   const key = routeKey();
   const { view } = ROUTES[key]!;
   const content = document.getElementById("content")!;
-  if (key !== currentKey) {
+  const entering = key !== currentKey;
+  if (view.persistent && !entering) { void renderFoot(); return; }
+  document.body.dataset.route = key;
+  if (entering) {
     currentKey = key;
     content.innerHTML = `<div class="loading">Cargando…</div>`;
     document.querySelectorAll<HTMLAnchorElement>("nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === key));
@@ -75,6 +80,14 @@ async function render(now = false): Promise<void> {
   document.getElementById("controls")!.innerHTML = view.headerControls?.() ?? "";
   window.clearTimeout(timer);
   const seq = ++renderSeq;
+  if (view.persistent) {
+    const host = document.createElement("div");
+    host.className = "content-inner";
+    content.replaceChildren(host);
+    try { await view.render(host); } catch (err) { if (seq === renderSeq) content.innerHTML = errorBox(err); }
+    void renderFoot();
+    return;
+  }
   try {
     // Render off-screen, then swap: avoids flicker and keeps scroll position.
     const staging = document.createElement("div");
