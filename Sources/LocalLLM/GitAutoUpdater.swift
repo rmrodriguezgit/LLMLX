@@ -68,7 +68,10 @@ final class GitAutoUpdater {
     func start() {
         guard cfg.enabled else { Log.info("git", "Auto-updater disabled by config"); return }
         Task {
+            let hadRepo = FileManager.default.fileExists(atPath: AppPaths.repo.appendingPathComponent(".git").path)
             await ensureRepository()
+            // First run: the clone now holds config/profiles.json, which takes precedence over the bundle copy.
+            if !hadRepo { _ = await app.reloadConfig(reason: "repository initialised") }
             await refreshHead()
             _ = await syncNow(trigger: .startup, waitForBuild: true)
         }
@@ -263,7 +266,8 @@ final class GitAutoUpdater {
         guard build.ok else {
             await rollback(to: previous, reason: "swift build failed (see \(buildLog.path))", bad: target)
             report.outcome = "rolled-back"
-            report.detail = "build failed: " + String(build.combined.suffix(600))
+            let errors = build.combined.split(separator: "\n").filter { $0.contains("error:") }.prefix(5).joined(separator: "\n")
+            report.detail = "build failed: " + (errors.isEmpty ? String(build.combined.suffix(600)) : errors)
             return report
         }
 
