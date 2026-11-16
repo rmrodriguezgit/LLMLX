@@ -130,7 +130,7 @@ final class AppCoordinator {
                                 gib(snapshot.availableBytes), gib(snapshot.thresholdBytes), snapshot.pressure, gib(snapshot.swapUsedBytes)))
         guard open, config.current.memoryGuard.purgeIdleModelOnPressure else { return }
         if admission.stats.inFlight == 0 {
-            Task { await ollama.unloadModels() }
+            Task { await ollama.unloadModels(); gateway.contextPolicy.forget() }
         } else {
             pendingPurge = true   // purge as soon as the in-flight generations finish
         }
@@ -139,7 +139,7 @@ final class AppCoordinator {
     private func idleReached() {
         guard pendingPurge, memory.isBreakerOpen else { pendingPurge = false; return }
         pendingPurge = false
-        Task { await ollama.unloadModels() }
+        Task { await ollama.unloadModels(); gateway.contextPolicy.forget() }
     }
 
     // MARK: Routing

@@ -70,6 +70,8 @@ struct HardwareProfileRule: Codable, Equatable {
     var fallbackModels: [String]
     var quantization: String
     var numCtx: Int
+    /// Largest window a client may request (num_ctx). nil = numCtx × 2.
+    var maxCtx: Int?
     var minCtx: Int
     var numParallel: Int
     var kvCacheType: String
@@ -141,6 +143,9 @@ final class ConfigStore {
         for p in c.profiles {
             guard p.numParallel >= 1, p.numCtx >= 512, p.minCtx >= 512, p.minCtx <= p.numCtx else {
                 throw ConfigError.invalid("profile \(p.id): numParallel/numCtx out of range")
+            }
+            if let maxCtx = p.maxCtx, maxCtx < p.numCtx {
+                throw ConfigError.invalid("profile \(p.id): maxCtx < numCtx")
             }
             guard p.maxMemoryGB > p.minMemoryGB, p.metalBudgetGB > 0, !p.model.isEmpty else {
                 throw ConfigError.invalid("profile \(p.id): memory range / budget / model invalid")

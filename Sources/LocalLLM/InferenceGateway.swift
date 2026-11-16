@@ -139,10 +139,64 @@ private final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler 
     }
 }
 
+// MARK: - Sticky context window
+
+/// Ollama reloads the runner (and reallocates the KV cache) whenever a request asks for a
+/// different `num_ctx` than the one the model was loaded with. Clients such as the Quantlabs
+/// Cerebro mix 8192 (Tutor) and 12288 (Constructor/blueprints), which caused a reload on every
+/// switch. This policy keeps one window per model: a request that fits in the loaded window
+/// reuses it; a larger one grows it to the next bucket (numCtx × 2ⁿ) capped by the profile.
+final class ContextPolicy: @unchecked Sendable {
+    private struct Entry { var ctx: Int; var lastUse: Date }
+    private let state = Locked<[String: Entry]>([:])
+
+    /// Window to send upstream for `model`. `requested` is the client's num_ctx (nil = none).
+    func resolve(model: String, requested: Int?, base: Int, cap: Int, keepAlive: TimeInterval) -> Int {
+        let base = max(512, base), cap = max(base, cap)
+        return state.mutate { table in
+            let now = Date()
+            var loaded: Int?
+            // Still resident if used within keep_alive and no other model ran after it (maxLoadedModels = 1).
+            if let mine = table[model], now.timeIntervalSince(mine.lastUse) < keepAlive,
+               !table.contains(where: { $0.key != model && $0.value.lastUse > mine.lastUse }) {
+                loaded = mine.ctx
+            }
+            let want = min(cap, max(requested ?? 0, 0))
+            var ctx: Int
+            if let l = loaded, want <= l {
+                ctx = l                          // fits: reuse the resident window, no reload
+            } else if want <= base {
+                ctx = loaded ?? base
+            } else {
+                ctx = base
+                while ctx < want && ctx < cap { ctx *= 2 }
+                ctx = min(ctx, cap)
+            }
+            table[model] = Entry(ctx: ctx, lastUse: now)
+            return ctx
+        }
+    }
+
+    func forget() { state.set([:]) }
+
+    /// "30m", "90s", "1h", "300" (seconds), "-1" (forever) → seconds.
+    static func seconds(_ keepAlive: String) -> TimeInterval {
+        let s = keepAlive.trimmingCharacters(in: .whitespaces).lowercased()
+        if s.hasPrefix("-") { return .infinity }
+        let units: [(String, Double)] = [("ms", 0.001), ("h", 3600), ("m", 60), ("s", 1)]
+        for (suffix, mult) in units where s.hasSuffix(suffix) {
+            if let v = Double(s.dropLast(suffix.count)) { return v * mult }
+        }
+        return Double(s) ?? 300
+    }
+}
+
 // MARK: - Gateway
 
 final class InferenceGateway {
-    private let group = MultiThreadedEventLoopGroup(numberOfThreads: max(2, System.coreCount))
+    /// HTTP fan-in is I/O bound: a few event loops are enough; the rest of the cores stay for Metal/llama.cpp.
+    private let group = MultiThreadedEventLoopGroup(numberOfThreads: max(2, min(4, System.coreCount / 2)))
+    let contextPolicy = ContextPolicy()
     private var serverChannel: Channel?
     private let children = Locked<[ObjectIdentifier: Channel]>([:])
     private let activeRequests = Locked<Int>(0)
@@ -327,8 +381,16 @@ final class InferenceGateway {
             }
         } else {
             var opts = json["options"] as? [String: Any] ?? [:]
-            if opts["num_ctx"] == nil { opts["num_ctx"] = plan.numCtx }
+            let rule = cfg.profiles.first { $0.id == plan.profileId }
+            // Same growth factor as the profile, applied to the plan's ctx (the profiler may have halved it).
+            let growth = rule.map { max(1, ($0.maxCtx ?? $0.numCtx * 2) / max(1, $0.numCtx)) } ?? 2
+            let requestedCtx = (opts["num_ctx"] as? NSNumber)?.intValue
+            opts["num_ctx"] = contextPolicy.resolve(model: model, requested: requestedCtx, base: plan.numCtx,
+                                                    cap: plan.numCtx * growth,
+                                                    keepAlive: ContextPolicy.seconds((json["keep_alive"] as? String) ?? cfg.ollama.keepAlive))
             if opts["num_gpu"] == nil { opts["num_gpu"] = plan.numGPU }
+            // Full Metal offload: CPU threads only tokenize/sample. Stay on P-cores, leave E-cores to the OS.
+            if opts["num_thread"] == nil, app.hardware.performanceCores > 0 { opts["num_thread"] = app.hardware.performanceCores }
             json["options"] = opts
             if json["keep_alive"] == nil { json["keep_alive"] = cfg.ollama.keepAlive }
         }

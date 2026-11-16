@@ -50,7 +50,9 @@ enum EmbeddedConfig {
       "Xcode": "high",
       "Cursor": "high",
       "Code": "high",
-      "batch-worker": "low"
+      "batch-worker": "low",
+      "Quantlabs-Cerebro": "high",
+      "Quantlabs-Cerebro-Blueprint": "normal"
     }
   },
   "updater": {
@@ -72,6 +74,7 @@ enum EmbeddedConfig {
       "fallbackModels": ["llama3.2:3b"],
       "quantization": "Q4_K_M",
       "numCtx": 4096,
+      "maxCtx": 4096,
       "minCtx": 2048,
       "numParallel": 1,
       "kvCacheType": "q8_0",
@@ -92,6 +95,7 @@ enum EmbeddedConfig {
       "fallbackModels": ["qwen2.5:7b"],
       "quantization": "Q4_K_M",
       "numCtx": 8192,
+      "maxCtx": 16384,
       "minCtx": 4096,
       "numParallel": 2,
       "kvCacheType": "q8_0",
@@ -112,6 +116,7 @@ enum EmbeddedConfig {
       "fallbackModels": ["qwen3:8b-q8_0", "qwen3:8b"],
       "quantization": "Q4_K_M",
       "numCtx": 16384,
+      "maxCtx": 32768,
       "minCtx": 8192,
       "numParallel": 4,
       "kvCacheType": "q8_0",
@@ -132,6 +137,7 @@ enum EmbeddedConfig {
       "fallbackModels": ["qwen2.5:32b"],
       "quantization": "Q4_K_M",
       "numCtx": 32768,
+      "maxCtx": 65536,
       "minCtx": 8192,
       "numParallel": 6,
       "kvCacheType": "q8_0",
@@ -152,6 +158,7 @@ enum EmbeddedConfig {
       "fallbackModels": ["qwen3:32b"],
       "quantization": "Q4_K_M",
       "numCtx": 32768,
+      "maxCtx": 65536,
       "minCtx": 8192,
       "numParallel": 6,
       "kvCacheType": "q8_0",
