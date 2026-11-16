@@ -264,6 +264,23 @@ final class TokenTracker {
         }
     }
 
+    /// Time-bucketed series for the dashboard charts.
+    func timeseries(since: Date, bucketSeconds: Int) -> [[String: Any]] {
+        readQueue.sync {
+            guard let db = reader else { return [] }
+            return db.query("""
+                SELECT CAST(ts / ? AS INTEGER) * ? AS t,
+                       COUNT(*) AS requests,
+                       SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS failed,
+                       COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,
+                       COALESCE(SUM(completion_tokens),0) AS completion_tokens,
+                       AVG(tokens_per_sec) AS tokens_per_sec,
+                       AVG(ttft_ms) AS ttft_ms
+                FROM requests WHERE ts >= ? GROUP BY 1 ORDER BY 1
+                """, [bucketSeconds, bucketSeconds, since.timeIntervalSince1970])
+        }
+    }
+
     private func percentiles(_ db: SQLiteDB, column: String, since: Double) -> (Double?, Double?) {
         let n = db.query("SELECT COUNT(\(column)) AS n FROM requests WHERE ts >= ? AND \(column) IS NOT NULL", [since]).first?["n"] as? Int ?? 0
         guard n > 0 else { return (nil, nil) }

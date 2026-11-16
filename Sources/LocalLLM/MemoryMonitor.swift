@@ -20,6 +20,14 @@ struct MemorySnapshot: Codable, Equatable {
     var thresholdBytes: UInt64
 }
 
+struct MemoryPoint: Codable {
+    var t: Double              // unix seconds
+    var available: UInt64
+    var used: UInt64
+    var swap: UInt64
+    var breaker: Bool
+}
+
 /// Real-time Mach VM sampling + kernel memory-pressure events driving a circuit breaker.
 final class MemoryMonitor {
     private static let host = mach_host_self()
@@ -38,6 +46,11 @@ final class MemoryMonitor {
     private var pressureLevel = "normal"
     private var healthySince: Double?
     private var config: MemoryGuardConfig
+    private let historyBox = Locked<[MemoryPoint]>([])
+    private var lastHistoryAt: Double = 0
+    /// 2-second resolution, 15 minutes of history for the dashboard.
+    private let historyInterval: Double = 2
+    private let historyCapacity = 450
 
     /// Called on the monitor queue when the breaker opens (true) or closes (false).
     var onBreakerChange: ((Bool, MemorySnapshot) -> Void)?
@@ -47,6 +60,7 @@ final class MemoryMonitor {
     var snapshot: MemorySnapshot { snapshotBox.get() }
     var isBreakerOpen: Bool { breaker.get() }
     var retryAfterSeconds: Int { config.retryAfterSeconds }
+    var history: [MemoryPoint] { historyBox.get() }
 
     func update(threshold: UInt64, config: MemoryGuardConfig) {
         thresholdBox.set(threshold)
@@ -105,6 +119,17 @@ final class MemoryMonitor {
         }
         s.breakerOpen = open
         snapshotBox.set(s)
+        let nowTs = Date().timeIntervalSince1970
+        if nowTs - lastHistoryAt >= historyInterval {
+            lastHistoryAt = nowTs
+            let point = MemoryPoint(t: nowTs, available: s.availableBytes,
+                                    used: s.totalBytes > s.availableBytes ? s.totalBytes - s.availableBytes : 0,
+                                    swap: s.swapUsedBytes, breaker: open)
+            historyBox.mutate { h in
+                h.append(point)
+                if h.count > historyCapacity { h.removeFirst(h.count - historyCapacity) }
+            }
+        }
         if open != wasOpen {
             breaker.set(open)
             Log.warn("memory", String(format: "Circuit breaker %@ (available %.2f GiB, threshold %.2f GiB, pressure %@)",

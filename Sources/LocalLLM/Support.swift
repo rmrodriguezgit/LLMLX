@@ -59,7 +59,14 @@ enum AppEnvironment {
     static var runningCommit: String { env["LOCALLLM_COMMIT"] ?? bundledCommit }
     static var bundledRemote: String? { appBundleInfo["LLMLXRemote"] as? String }
     static var bundledBranch: String? { appBundleInfo["LLMLXBranch"] as? String }
-    static var version: String { appBundleInfo["CFBundleShortVersionString"] as? String ?? "0.0.0-dev" }
+    /// Version of the running binary. Auto-updated binaries receive LOCALLLM_VERSION from the updater
+    /// (1.0.<commit count>, the same scheme build_dmg.sh writes into Info.plist).
+    static var version: String {
+        if let v = env["LOCALLLM_VERSION"], !v.isEmpty { return v }
+        return appBundleInfo["CFBundleShortVersionString"] as? String ?? "0.0.0-dev"
+    }
+    static var shortCommit: String { String(runningCommit.prefix(7)) }
+    static var displayVersion: String { "v\(version) (\(shortCommit))" }
     static var executableURL: URL { URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath() }
 }
 
@@ -91,6 +98,16 @@ enum AppPaths {
     static var database: URL { appSupport.appendingPathComponent("telemetry.sqlite") }
     static var ollamaPidFile: URL { appSupport.appendingPathComponent("ollama.pid.json") }
     static var updaterState: URL { appSupport.appendingPathComponent("updater-state.json") }
+    static var modelOverride: URL { appSupport.appendingPathComponent("model-override.json") }
+
+    /// Dashboard static files: Git-synced repo first (updates without recompiling), then the app bundle.
+    static var webRoot: URL? {
+        var candidates: [URL] = []
+        if let e = ProcessInfo.processInfo.environment["LOCALLLM_WEB_ROOT"], !e.isEmpty { candidates.append(URL(fileURLWithPath: e)) }
+        candidates.append(repo.appendingPathComponent("web/dist"))
+        if let r = AppEnvironment.resourcesURL { candidates.append(r.appendingPathComponent("web")) }
+        return candidates.first { fm.fileExists(atPath: $0.appendingPathComponent("index.html").path) }
+    }
 
     private static func env(_ k: String) -> String? {
         let v = ProcessInfo.processInfo.environment[k]

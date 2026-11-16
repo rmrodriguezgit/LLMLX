@@ -25,10 +25,37 @@ final class AppCoordinator {
     private var pendingPurge = false
 
     var plan: ModelPlan { planBox.get() }
+    /// Model the user picked in the menu bar / dashboard (nil = automatic by hardware profile).
+    private let overrideBox = Locked<String?>(AppCoordinator.loadOverride())
+    var modelOverride: String? { overrideBox.get() }
+    /// The model the profiler chose before any manual override.
+    private let autoModelBox = Locked<String>("")
+    var autoModel: String { autoModelBox.get() }
+
+    private static func loadOverride() -> String? {
+        guard let d = try? Data(contentsOf: AppPaths.modelOverride), let o = JSON.object(d) else { return nil }
+        return (o["model"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// Profiler selection + manual model override.
+    private func computePlan(_ cfg: RemoteConfig) -> ModelPlan {
+        var p = HardwareProfiler.select(hardware: hardware, config: cfg)
+        autoModelBox.set(p.model)
+        if let o = overrideBox.get(), ProcessInfo.processInfo.environment["LOCALLLM_FORCE_MODEL"] == nil {
+            p.adjustments.append("Modelo elegido manualmente: \(o) (automático sería \(p.model))")
+            p.model = o
+        }
+        return p
+    }
 
     private init() {
         hardware = HardwareProfiler.detect()
-        let p = HardwareProfiler.select(hardware: hardware, config: config.current)
+        var p = HardwareProfiler.select(hardware: hardware, config: config.current)
+        autoModelBox.set(p.model)
+        if let o = overrideBox.get(), ProcessInfo.processInfo.environment["LOCALLLM_FORCE_MODEL"] == nil {
+            p.adjustments.append("Modelo elegido manualmente: \(o) (automático sería \(p.model))")
+            p.model = o
+        }
         planBox = Locked(p)
         memory = MemoryMonitor(config: config.current.memoryGuard)
         let isHealthCheck = CommandLine.arguments.contains("--health-check")
@@ -130,6 +157,44 @@ final class AppCoordinator {
         return auto
     }
 
+    // MARK: Manual model selection
+
+    /// Sets (or clears with nil) the manual model. Pulls it if needed, then loads it in Metal.
+    func setModel(_ model: String?) async -> (ok: Bool, detail: String) {
+        let m = model?.trimmingCharacters(in: .whitespaces)
+        let value = (m?.isEmpty ?? true) ? nil : m
+        if let v = value, ollama.installedModels[v] == nil, ollama.installedModels[v + ":latest"] == nil,
+           !config.current.ollama.autoPull {
+            return (false, "\(v) no está instalado y autoPull está desactivado")
+        }
+        overrideBox.set(value)
+        if let v = value {
+            try? JSONSerialization.data(withJSONObject: ["model": v]).write(to: AppPaths.modelOverride, options: .atomic)
+        } else {
+            try? FileManager.default.removeItem(at: AppPaths.modelOverride)
+        }
+        let cfg = config.current
+        let newPlan = computePlan(cfg)
+        planBox.set(newPlan)
+        tracker.incident("model-selected", value.map { "manual: \($0)" } ?? "automático: \(newPlan.model)")
+        let admission = self.admission
+        Task { await ollama.apply(plan: newPlan, config: cfg.ollama, admission: admission, drainTimeout: cfg.gateway.drainTimeoutSeconds) }
+        return (true, "modelo activo: \(newPlan.model)")
+    }
+
+    func modelsPayload() -> [String: Any] {
+        let installed = ollama.installedModels.sorted { $0.key < $1.key }.map { ["name": $0.key, "sizeBytes": $0.value] as [String: Any] }
+        return [
+            "active": plan.model,
+            "auto": autoModel,
+            "override": modelOverride ?? NSNull(),
+            "installed": installed,
+            "loaded": JSON.dictionary(ollama.loadedModels),
+            "lastUsed": tracker.liveStats.lastModel ?? NSNull(),
+            "engine": ollama.status.label
+        ]
+    }
+
     // MARK: Hot reload (Level 1)
 
     func reloadConfig(reason: String) async -> (ok: Bool, detail: String) {
@@ -139,7 +204,7 @@ final class AppCoordinator {
             return (false, error.localizedDescription)
         }
         let oldPlan = plan
-        let newPlan = HardwareProfiler.select(hardware: hardware, config: new)
+        let newPlan = computePlan(new)
         planBox.set(newPlan)
         memory.update(threshold: newPlan.minFreeBytes, config: new.memoryGuard)
         admission.configure(capacity: newPlan.numParallel, maxQueue: new.gateway.maxQueueDepth)
@@ -162,7 +227,7 @@ final class AppCoordinator {
 
     /// Spawns the new binary (it binds the same port via SO_REUSEPORT and adopts the running
     /// Ollama), waits for its SIGUSR1 "ready", then drains in-flight requests and exits.
-    func performBlueGreenRestart(binary: URL, commit: String) async -> Bool {
+    func performBlueGreenRestart(binary: URL, commit: String, version: String? = nil) async -> Bool {
         guard mode == .app || mode == .headless else { return false }
         let p = Process()
         p.executableURL = binary
@@ -172,6 +237,7 @@ final class AppCoordinator {
         env["LOCALLLM_PARENT_PID"] = String(getpid())
         env["LOCALLLM_COMMIT"] = commit
         env["LOCALLLM_REDIRECTED"] = "1"
+        if let version { env["LOCALLLM_VERSION"] = version }
         if let b = AppEnvironment.appBundleURL { env["LOCALLLM_APP_BUNDLE"] = b.path }
         if let r = AppEnvironment.resourcesURL { env["LOCALLLM_RESOURCES"] = r.path }
         p.environment = env
@@ -225,7 +291,8 @@ final class AppCoordinator {
             "uptimeSeconds": Int(Date().timeIntervalSince(startedAt)),
             "engine": ollama.status.label,
             "model": plan.model,
-            "breakerOpen": memory.isBreakerOpen
+            "breakerOpen": memory.isBreakerOpen,
+            "displayVersion": AppEnvironment.displayVersion
         ]
     }
 
@@ -242,18 +309,48 @@ final class AppCoordinator {
         ]
     }
 
+    func timeseriesPayload(window: String?) -> [String: Any] {
+        let w = window ?? "24h"
+        let (seconds, bucket): (Double, Int)
+        switch w {
+        case "1h": (seconds, bucket) = (3600, 60)
+        case "7d": (seconds, bucket) = (7 * 86_400, 7200)
+        case "30d", "all": (seconds, bucket) = (30 * 86_400, 86_400)
+        default: (seconds, bucket) = (86_400, 900)
+        }
+        let since = Date().addingTimeInterval(-seconds)
+        return ["window": w, "bucketSeconds": bucket, "from": since.timeIntervalSince1970,
+                "to": Date().timeIntervalSince1970,
+                "points": tracker.timeseries(since: since, bucketSeconds: bucket)]
+    }
+
+    func memoryPayload() -> [String: Any] {
+        let loaded = ollama.loadedModels
+        return [
+            "now": JSON.dictionary(memory.snapshot),
+            "history": JSON.dictionary(memory.history),
+            "loadedModels": JSON.dictionary(loaded),
+            "weightsBytes": loaded.reduce(UInt64(0)) { $0 + $1.weightsBytes },
+            "kvCacheBytes": loaded.reduce(UInt64(0)) { $0 + $1.kvCacheBytes },
+            "plan": ["model": plan.model, "budgetBytes": plan.metalBudgetBytes, "minFreeBytes": plan.minFreeBytes,
+                     "estimate": JSON.dictionary(plan.estimate)] as [String: Any]
+        ]
+    }
+
     func metricsPayload(window: String?) -> [String: Any] {
         let since: Date?
         switch window ?? "all" {
         case "1h": since = Date().addingTimeInterval(-3600)
         case "24h": since = Date().addingTimeInterval(-86_400)
         case "7d": since = Date().addingTimeInterval(-7 * 86_400)
+        case "30d": since = Date().addingTimeInterval(-30 * 86_400)
         case "session": since = startedAt
         default: since = nil
         }
         var m = tracker.metrics(since: since)
         let a = admission.stats
         m["window"] = window ?? "all"
+        m["version"] = AppEnvironment.displayVersion
         m["generatedAt"] = ISO8601DateFormatter().string(from: Date())
         m["live"] = [
             "inFlight": a.inFlight,
@@ -288,6 +385,7 @@ enum Launcher {
         // A newer .dmg install has a different bundled commit, so stale updates are ignored.
         setenv("LOCALLLM_REDIRECTED", "1", 1)
         setenv("LOCALLLM_COMMIT", commit, 1)
+        if let v = meta["version"] as? String { setenv("LOCALLLM_VERSION", v, 1) }
         if let b = AppEnvironment.appBundleURL { setenv("LOCALLLM_APP_BUNDLE", b.path, 1) }
         if let r = AppEnvironment.resourcesURL { setenv("LOCALLLM_RESOURCES", r.path, 1) }
         Log.info("launcher", "Executing auto-updated binary \(path) (\(commit.prefix(8)))")

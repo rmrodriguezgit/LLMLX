@@ -59,6 +59,18 @@ log "Remote: $REMOTE_URL  branch: $BRANCH  commit: ${COMMIT:0:12}  version: $APP
 # Keep the embedded fallback config in sync with config/profiles.json
 ./scripts/embed_config.sh >/dev/null
 
+# App icon (regenerated only if missing)
+[[ -f assets/AppIcon.icns ]] || ./scripts/make_icns.sh
+
+# Dashboard (TypeScript). web/dist is committed, so Node is optional.
+if command -v npm >/dev/null 2>&1; then
+  log "Building dashboard (TypeScript)"
+  (cd web && { [[ -d node_modules ]] || npm ci --no-audit --no-fund >/dev/null; } && npm run build >/dev/null)
+else
+  log "npm not found; using committed web/dist"
+fi
+[[ -f web/dist/index.html ]] || fail "web/dist missing (run: cd web && npm install && npm run build)"
+
 # ---------------------------------------------------------------------------
 # 2. Compile (Release, arm64)
 # ---------------------------------------------------------------------------
@@ -75,6 +87,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ollama"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 cp config/profiles.json "$APP/Contents/Resources/profiles.json"
+cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp -R web/dist "$APP/Contents/Resources/web"
+rm -f "$APP/Contents/Resources/web/app.js.map"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -86,6 +101,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundleShortVersionString</key><string>$APP_VERSION</string>
   <key>CFBundleVersion</key><string>$COMMIT_COUNT</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -149,6 +166,10 @@ while IFS= read -r -d '' f; do
   fi
 done < <(find "$OLLAMA_DIR" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' \) -print0)
 lipo -archs "$OLLAMA_DIR/ollama" | grep -q arm64 || fail "embedded ollama is not arm64"
+if ! find "$OLLAMA_DIR" -name 'libollama_xgrammar*' | grep -q .; then
+  log "WARNING: this Ollama build has no libollama_xgrammar: requests with JSON schema / structured output"
+  log "         will fail with 501. Build without OLLAMA_BIN to embed the official release."
+fi
 log "Ollama embedded: $("$OLLAMA_DIR/ollama" --version 2>/dev/null | tail -1 || echo unknown)"
 
 # ---------------------------------------------------------------------------
@@ -189,9 +210,22 @@ log "Creating $DMG_NAME"
 STAGE="$(mktemp -d)"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
+# Volume icon shown when the DMG is mounted
+cp assets/AppIcon.icns "$STAGE/.VolumeIcon.icns"
 rm -f "$DIST/$DMG_NAME"
-hdiutil create -volname "$VOLUME_NAME" -srcfolder "$STAGE" -ov -format UDZO -fs HFS+ "$DIST/$DMG_NAME" >/dev/null
+RW="$(mktemp -d)/rw.dmg"
+hdiutil create -volname "$VOLUME_NAME" -srcfolder "$STAGE" -ov -format UDRW -fs HFS+ "$RW" >/dev/null 2>&1
 rm -rf "$STAGE"
+# The "custom icon" flag must be set on the mounted volume root, then the image is compressed.
+MNT="$(hdiutil attach -nobrowse -noautoopen "$RW" 2>/dev/null | tail -1 | awk -F'\t' '{print $NF}')"
+if [[ -n "$MNT" && -d "$MNT" ]]; then
+  command -v SetFile >/dev/null && SetFile -a C "$MNT" || true
+  hdiutil detach "$MNT" -quiet || hdiutil detach "$MNT" -force -quiet
+fi
+hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$DIST/$DMG_NAME" >/dev/null 2>&1
+rm -f "$RW"
+# Custom Finder icon for the .dmg file itself (local only; GitHub/HTTP downloads drop it)
+osascript -l JavaScript -e "ObjC.import('AppKit'); \$.NSWorkspace.sharedWorkspace.setIconForFileOptions(\$.NSImage.alloc.initWithContentsOfFile('$ROOT/assets/AppIcon.icns'), '$DIST/$DMG_NAME', 0)" >/dev/null 2>&1 || true
 if [[ "$SIGN_IDENTITY" != "-" ]]; then
   codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DIST/$DMG_NAME"
   if [[ -n "${NOTARY_PROFILE:-}" ]]; then

@@ -93,6 +93,12 @@ struct UISnapshot {
     var gitLastOutcome = ""
     var runningCommit = ""
     var gatewayURL = ""
+    var autoModel = ""
+    var modelOverride: String?
+    var installedModels: [String] = []
+    var loadedLine = ""
+    var lastUsedModel: String?
+    var displayVersion = ""
 }
 
 @MainActor
@@ -154,8 +160,27 @@ final class AppState: ObservableObject {
         s.gitLastSync = git.lastSyncAt
         s.gitLastOutcome = git.lastReport.map { "\($0.outcome): \($0.detail)" } ?? ""
         s.runningCommit = String(AppEnvironment.runningCommit.prefix(8))
+        s.autoModel = app.autoModel
+        s.modelOverride = app.modelOverride
+        s.installedModels = app.ollama.installedModels.keys.sorted()
+        s.lastUsedModel = live.lastModel
+        if loaded.isEmpty {
+            s.loadedLine = mem.breakerOpen || app.tracker.liveStats.requests > 0
+                ? "En memoria: ninguno (se descarga por inactividad o memoria baja; se recarga en la próxima petición)"
+                : "En memoria: ninguno (se carga con la primera petición)"
+        } else {
+            s.loadedLine = "En memoria: " + loaded.map { "\($0.name) \(fmtGB($0.sizeBytes))" }.joined(separator: ", ")
+        }
+        s.displayVersion = "LocalLLM \(AppEnvironment.displayVersion)"
         s.gatewayURL = "http://\(cfg.gateway.host):\(app.gateway.boundPort == 0 ? cfg.gateway.port : app.gateway.boundPort)"
         snapshot = s
+    }
+
+    func selectModel(_ model: String?) {
+        Task {
+            _ = await AppCoordinator.shared.setModel(model)
+            await MainActor.run { self.refresh() }
+        }
     }
 
     func syncGit() {
@@ -176,7 +201,7 @@ final class AppState: ObservableObject {
 
 // MARK: - Views
 
-private func fmtGB(_ b: UInt64) -> String { String(format: "%.1f GB", gib(b)) }
+func fmtGB(_ b: UInt64) -> String { String(format: "%.1f GB", gib(b)) }
 private func fmtCount(_ n: Int) -> String {
     n >= 1_000_000 ? String(format: "%.2fM", Double(n) / 1e6) : n >= 10_000 ? String(format: "%.1fk", Double(n) / 1e3) : "\(n)"
 }
@@ -198,9 +223,34 @@ struct MenuContentView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 3) {
-                Label(s.model, systemImage: "brain").font(.system(.body, design: .monospaced))
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: "brain")
+                    Menu {
+                        Button("Automático (\(s.autoModel))") { state.selectModel(nil) }
+                        Divider()
+                        ForEach(s.installedModels, id: \.self) { name in
+                            Button {
+                                state.selectModel(name)
+                            } label: {
+                                if s.modelOverride == name { Label(name, systemImage: "checkmark") } else { Text(name) }
+                            }
+                        }
+                    } label: {
+                        Text(s.model).font(.system(.body, design: .monospaced))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Modelo por defecto para las peticiones que piden \"default\", \"local\" o un alias (gpt-4o…). Si una app pide un modelo instalado concreto, se usa ese.")
+                    Text(s.modelOverride == nil ? "auto" : "manual")
+                        .font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.18)))
+                }
                 Text(s.engine).font(.caption).foregroundStyle(.secondary)
+                Text(s.loadedLine).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let last = s.lastUsedModel, last != s.model {
+                    Text("Última petición usó: \(last)").font(.caption).foregroundStyle(.orange)
+                }
                 Text(s.profileLine).font(.caption2).foregroundStyle(.secondary)
             }
 
@@ -234,21 +284,21 @@ struct MenuContentView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Image(systemName: "arrow.triangle.branch")
-                    Text("Git \(s.gitCommit)").font(.system(.caption, design: .monospaced))
-                    Text("• \(s.gitState)").font(.caption).foregroundStyle(.secondary)
+                    Image(systemName: "arrow.down.circle")
+                    Text("Actualizaciones automáticas").font(.caption.bold())
+                    Text("• \(updateStateLabel(s.gitState))").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Text("bin \(s.runningCommit)").font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
                 }
-                if !s.gitSubject.isEmpty { Text(s.gitSubject).font(.caption).lineLimit(1) }
+                .help("La app revisa GitHub (rmrodriguezgit/LLMLX) cada 15 min. Cambios de configuración se aplican al instante; cambios de código se compilan solos y la app se reinicia sin cortar peticiones.")
+                Text("Último cambio: \(s.gitSubject.isEmpty ? "—" : s.gitSubject)").font(.caption).lineLimit(1)
                 if let d = s.gitLastSync {
-                    Text("Última sync: \(d.formatted(date: .omitted, time: .standard)) — \(s.gitLastOutcome)")
+                    Text("Revisado \(d.formatted(date: .omitted, time: .shortened)) — \(updateOutcomeLabel(s.gitLastOutcome))")
                         .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Button {
                     state.syncGit()
                 } label: {
-                    Label(state.syncing ? "Sincronizando…" : "Sincronizar Git Ahora", systemImage: "arrow.clockwise")
+                    Label(state.syncing ? "Buscando…" : "Buscar actualizaciones ahora", systemImage: "arrow.clockwise")
                 }
                 .disabled(state.syncing)
             }
@@ -260,8 +310,9 @@ struct MenuContentView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(s.gatewayURL + "/v1", forType: .string)
                 }
-                Button("Métricas") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/v1/metrics")!) }
-                Button("Perfil") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/v1/hardware-profile")!) }
+                Button("Métricas") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/metricas")!) }
+                Button("Memoria") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/memoria")!) }
+                Button("Perfil") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/perfil")!) }
             }
             .buttonStyle(.link)
             .font(.caption)
@@ -272,7 +323,12 @@ struct MenuContentView: View {
                 Spacer()
                 Button("Salir") { NSApp.terminate(nil) }
             }
-            Text(s.gatewayURL).font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary)
+            HStack {
+                Text(s.displayVersion).font(.system(.caption2, design: .monospaced))
+                Spacer()
+                Text(s.gatewayURL).font(.system(.caption2, design: .monospaced))
+            }
+            .foregroundStyle(.tertiary)
         }
         .padding(14)
         .frame(width: 360)
@@ -325,5 +381,34 @@ struct MemoryBar: View {
 
     private func legend(_ color: Color, _ text: String) -> some View {
         HStack(spacing: 3) { Circle().fill(color).frame(width: 6, height: 6); Text(text) }
+    }
+}
+
+private func updateStateLabel(_ state: String) -> String {
+    switch state {
+    case "idle": return "al día"
+    case "fetching": return "buscando cambios…"
+    case "pulling": return "descargando cambios…"
+    case "building": return "compilando nueva versión…"
+    case "health-check": return "probando nueva versión…"
+    case "restarting": return "reiniciando…"
+    case "git-unavailable": return "git no disponible"
+    case "clone-failed": return "sin conexión con GitHub"
+    default: return state
+    }
+}
+
+private func updateOutcomeLabel(_ outcome: String) -> String {
+    let kind = outcome.split(separator: ":").first.map(String.init) ?? outcome
+    switch kind {
+    case "up-to-date": return "sin cambios nuevos"
+    case "hot-reloaded": return "configuración aplicada"
+    case "rebuilding": return "compilando en segundo plano"
+    case "rebuilt": return "nueva versión instalada"
+    case "rolled-back": return "cambio rechazado (se mantuvo la versión anterior)"
+    case "pulled": return "cambios descargados"
+    case "failed": return "error al revisar: " + outcome.dropFirst(kind.count + 1).trimmingCharacters(in: .whitespaces)
+    case "skipped": return "omitido"
+    default: return outcome
     }
 }

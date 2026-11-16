@@ -1,8 +1,104 @@
+<p align="center"><img src="assets/AppIcon-256.png" width="128" alt="LocalLLM"></p>
+
 # LLMLX
 
 **LocalLLM**: una app nativa de barra de menú para macOS (Apple Silicon) que hace de gateway de inferencia local sobre Ollama. Perfila el hardware, elige el modelo y los parámetros que caben en tu Mac, protege la RAM frente al swap, registra cada token en SQLite y se actualiza sola desde este repositorio Git.
 
 Está calibrada para un **Apple M3 con 16 GB** de memoria unificada y escala de forma automática a Macs de 8 GB a 192 GB.
+
+**Accesos rápidos:**
+- [Instalar o actualizar la app](#0-instalar-o-actualizar-la-app)
+- [Panel web](#panel-web-métricas-memoria-perfil)
+- [¿Para qué sirve Git aquí?](#para-qué-sirve-la-parte-de-git)
+- [Cómo usarlo desde tus apps](#5-cómo-usarlo-desde-otras-apps)
+
+---
+
+## 0. Instalar o actualizar la app
+
+### Primera instalación o reemplazo por una versión nueva
+
+Ejecuta un solo comando desde la carpeta del repo:
+
+```bash
+cd ~/Documents/LLMLX && git pull && ./scripts/install_app.sh
+```
+
+El script hace esto:
+
+1. Compila la app en Release (arm64).
+2. Compila el panel TypeScript.
+3. Descarga el **Ollama oficial** y verifica su checksum.
+4. Genera `dist/LocalLLM-M3.dmg`.
+5. Cierra la app que esté abierta. Antes deja terminar las peticiones en curso.
+6. Reemplaza `/Applications/LocalLLM.app` y la vuelve a abrir.
+
+Tus datos se conservan: métricas, modelo elegido, repositorio local y modelos descargados.
+
+> Usa el Ollama oficial (sin `OLLAMA_BIN`). El de Homebrew no trae `libollama_xgrammar`, así que las peticiones con *structured output* / JSON schema fallan con 501.
+
+Si prefieres hacerlo a mano:
+
+```bash
+./build_dmg.sh                                   # 1. genera dist/LocalLLM-M3.dmg
+osascript -e 'tell application id "com.llmlx.localllm" to quit'   # 2. cierra la app
+open dist/LocalLLM-M3.dmg                        # 3. arrastra LocalLLM a Aplicaciones → Reemplazar
+xattr -dr com.apple.quarantine /Applications/LocalLLM.app       # 4. (si macOS la bloquea)
+open /Applications/LocalLLM.app                  # 5. ábrela
+```
+
+Comprueba la versión instalada en la última línea del menú de la barra (`LocalLLM v1.0.N (commit)`) o con:
+
+```bash
+curl -s http://127.0.0.1:11500/health | grep displayVersion
+```
+
+### Actualizaciones del día a día: no hace falta reinstalar
+
+Normalmente basta con `git push` a este repo. La app instalada revisa GitHub cada 15 minutos y se actualiza sola (ver [¿Para qué sirve Git aquí?](#para-qué-sirve-la-parte-de-git)). Solo hace falta reinstalar con `install_app.sh` en estos casos:
+
+- Cambia el Ollama embebido.
+- Cambian `Info.plist` o el icono.
+- El Mac no tiene Xcode Command Line Tools y por tanto no puede recompilar solo.
+
+### Panel web (métricas, memoria, perfil)
+
+Ábrelo en `http://127.0.0.1:11500/dashboard/`, o con los botones **Métricas / Memoria / Perfil** del menú. Es una app TypeScript sin dependencias en tiempo de ejecución, con tema claro y oscuro:
+
+| Sección | Qué muestra |
+|---|---|
+| **Métricas** | Peticiones, tokens de entrada y salida, tok/s, TTFT p50/p95, rechazos; gráficas por intervalo (1 h, 24 h, 7 d, 30 d); uso por modelo y por app; últimas peticiones; incidentes |
+| **Memoria** | Composición en vivo (pesos / KV-cache / macOS / libre) con la línea del umbral del breaker; RAM disponible y swap de los últimos 15 min; modelos cargados en Metal |
+| **Perfil de hardware** | Chip, núcleos CPU/GPU, RAM, plan elegido y su justificación, presupuesto Metal, variables de Ollama y **selector de modelo** |
+| **Actualizaciones** | Explicación de Git, estado, último cambio recibido, versión en ejecución y botón "Buscar actualizaciones ahora" |
+
+El código está en `web/src/*.ts`. Para modificarlo:
+
+```bash
+cd web && npm install && npm run build   # typecheck + bundle → web/dist (se commitea)
+```
+
+Tras un `git push`, la app instalada sirve el panel nuevo desde su clon del repo, sin recompilar nada.
+
+### Elegir modelo
+
+Desde el menú (clic en el nombre del modelo) o desde **Perfil de hardware → Elegir modelo**:
+
+- **Automático**: usa el modelo que el profiler elige para tu Mac (`qwen3:8b` en 16 GB).
+- **Cualquier modelo instalado**: pasa a ser el destino de `"model": "default"`, `"local"` y de los alias (`gpt-4o`…). La elección se guarda y sobrevive a reinicios.
+
+Si una app pide un modelo instalado por su nombre exacto (por ejemplo `qwen3.5:4b`), se respeta ese nombre. El menú lo indica con *"Última petición usó: …"* y la línea *"En memoria:"* muestra lo que realmente está cargado en la GPU.
+
+### ¿Para qué sirve la parte de Git?
+
+Git sirve para que **tu app instalada se mantenga al día sola**, sin reinstalar el `.dmg`:
+
+1. Cada 15 minutos (o al pulsar **Buscar actualizaciones ahora**), la app mira si hay commits nuevos en `github.com/rmrodriguezgit/LLMLX`.
+2. Si cambió **`config/profiles.json`** (modelos por tipo de Mac, límites de RAM, alias, orígenes web permitidos…), se aplica **al instante**, sin cortar peticiones.
+3. Si cambió el **panel web** (`web/dist`), se sirve la versión nueva de inmediato.
+4. Si cambió el **código Swift**, la app lo compila en segundo plano con los núcleos de eficiencia, prueba el binario nuevo y **se reemplaza sola** sin cortar peticiones. Si la compilación o la prueba fallan, vuelve a la versión anterior y lo registra como incidente.
+
+En la práctica: `git push` desde cualquier Mac actualiza todos los Macs que tengan LocalLLM instalado. Si no lo necesitas, desactívalo con `"updater": { "enabled": false }` en `config/profiles.json`.
 
 ---
 
@@ -85,11 +181,21 @@ el proceso viejo cierra el listener, drena las peticiones en vuelo y sale
 ```
 LLMLX/
 ├── Package.swift                      # SwiftPM: ejecutable LocalLLM (macOS 13+, swift-nio)
-├── build_dmg.sh                       # Release arm64 → .app → embebe Ollama → firma → LocalLLM-M3.dmg
+├── build_dmg.sh                       # Release arm64 → .app → panel + Ollama + icono → firma → LocalLLM-M3.dmg
+├── assets/
+│   ├── AppIcon.icns                   # Icono de la app y del volumen del DMG
+│   └── AppIcon-1024.png / -256.png
 ├── config/
 │   └── profiles.json                  # Configuración remota (hot-reload vía Git)
 ├── scripts/
+│   ├── install_app.sh                 # Compila y reemplaza /Applications/LocalLLM.app
+│   ├── make_icon.swift / make_icns.sh # Dibuja el icono con CoreGraphics y genera el .icns
 │   └── embed_config.sh                # Regenera EmbeddedConfig.swift desde profiles.json
+├── web/                               # Panel TypeScript (servido en /dashboard/)
+│   ├── src/main.ts, api.ts, charts.ts, ui.ts, format.ts, types.ts
+│   ├── src/views/metrics.ts, memory.ts, profile.ts, system.ts
+│   ├── index.html, styles.css
+│   └── dist/                          # Build commiteado (la app lo sirve sin Node)
 └── Sources/LocalLLM/
     ├── MenuBarApp.swift               # @main, modos --headless/--health-check, UI SwiftUI
     ├── AppCoordinator.swift           # Ciclo de vida, hot-reload, blue/green, payloads, Launcher
@@ -114,6 +220,7 @@ Archivos en tiempo de ejecución (`~/Library/Application Support/LocalLLM/`):
 | `bin/LocalLLM-<sha>`, `bin/current` | Binarios auto-compilados y el symlink activo |
 | `ollama.pid.json` | PID y hash de configuración del Ollama gestionado (para adoptarlo en el hand-off) |
 | `updater-state.json` | Último commit, último resultado y commits marcados como malos |
+| `model-override.json` | Modelo elegido manualmente (si existe) |
 
 Logs en `~/Library/Logs/LocalLLM/`: `localllm.log`, `ollama.log` y `auto-update-build.log`.
 
@@ -151,7 +258,12 @@ Base URL: `http://127.0.0.1:11500`
 | POST | `/v1/system/git-sync` | Sincroniza ya (`200` si terminó; `202` si quedó compilando) |
 | GET | `/v1/system/git-status` | Estado del actualizador |
 | POST | `/v1/system/reload-config` | Recarga `profiles.json` en caliente |
-| GET | `/health` | Health-check |
+| GET | `/health` | Health-check (incluye `displayVersion`) |
+| GET | `/dashboard/` | Panel web |
+| GET | `/v1/metrics/timeseries?window=1h\|24h\|7d\|30d` | Series por intervalo para gráficas |
+| GET | `/v1/system/memory` | Memoria en vivo + historial de 15 min |
+| GET | `/v1/system/models` | Modelo activo, automático, elegido, instalados y cargados |
+| POST | `/v1/system/model` | `{"model": "qwen3.5:4b"}` elige modelo; `{"model": null}` vuelve a automático |
 
 Cabeceras opcionales:
 - `X-Client-App: mi-agente` identifica al cliente en las métricas. Sin ella se usa el producto del `User-Agent`.
@@ -640,11 +752,12 @@ Requisitos: macOS 13 o superior en Apple Silicon y Xcode Command Line Tools (`xc
 ```bash
 swift build -c release            # compilar
 .build/release/LocalLLM --headless   # ejecutar sin UI (servidor)
-./build_dmg.sh                    # genera dist/LocalLLM-M3.dmg (descarga Ollama)
+./build_dmg.sh                    # genera dist/LocalLLM-M3.dmg (descarga Ollama oficial)
+./scripts/install_app.sh          # lo anterior + reemplaza la app en /Applications
 ```
 
 ```bash
-OLLAMA_BIN=/opt/homebrew/bin/ollama ./build_dmg.sh   # usar un Ollama local en vez de descargarlo
+OLLAMA_BIN=/opt/homebrew/bin/ollama ./build_dmg.sh   # Ollama local (sin structured output; ver arriba)
 ```
 
 ```bash

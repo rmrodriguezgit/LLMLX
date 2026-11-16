@@ -293,13 +293,18 @@ final class GitAutoUpdater {
             return report
         }
 
+        // Same versioning scheme as build_dmg.sh: 1.0.<number of commits>.
+        let count = (await git(["rev-list", "--count", "HEAD"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newVersion: String? = Int(count).map { "1.0.\($0)" }
+
         // Atomic swap of bin/current (symlink rename is atomic on APFS).
         let tmpLink = AppPaths.binDir.appendingPathComponent("current.tmp")
         try? FileManager.default.removeItem(at: tmpLink)
         do {
             try FileManager.default.createSymbolicLink(at: tmpLink, withDestinationURL: candidate)
             guard rename(tmpLink.path, AppPaths.currentBinaryLink.path) == 0 else { throw NSError(domain: "rename", code: Int(errno)) }
-            let meta: [String: String] = ["commit": target, "path": candidate.path, "baseBundleCommit": AppEnvironment.bundledCommit]
+            var meta: [String: String] = ["commit": target, "path": candidate.path, "baseBundleCommit": AppEnvironment.bundledCommit]
+            if let v = newVersion { meta["version"] = v }
             try JSONSerialization.data(withJSONObject: meta).write(to: AppPaths.currentBinaryMeta, options: .atomic)
         } catch {
             await rollback(to: previous, reason: "atomic swap failed: \(error.localizedDescription)", bad: target)
@@ -311,7 +316,7 @@ final class GitAutoUpdater {
         report.outcome = "rebuilt"
         report.detail = "built \(target.prefix(8)); blue/green restart in progress"
         update { $0.lastReport = report }
-        let ok = await app.performBlueGreenRestart(binary: candidate, commit: target)
+        let ok = await app.performBlueGreenRestart(binary: candidate, commit: target, version: newVersion)
         if !ok {
             await rollback(to: previous, reason: "new instance did not take over", bad: target)
             restorePreviousBinaryLink()

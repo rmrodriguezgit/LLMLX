@@ -222,6 +222,22 @@ final class InferenceGateway {
         }
 
         switch (req.method, req.path) {
+        case (.GET, "/") where (req.headers.first(name: "Accept") ?? "").contains("text/html"):
+            await w.send(status: .found, headers: [("Location", "/dashboard/"), ("Content-Type", "text/plain")], body: Data())
+        case (.GET, "/dashboard"):
+            await w.send(status: .movedPermanently, headers: [("Location", "/dashboard/"), ("Content-Type", "text/plain")], body: Data())
+        case (.GET, let p) where p.hasPrefix("/dashboard/"):
+            await serveStatic(String(p.dropFirst("/dashboard/".count)), w)
+        case (.GET, "/v1/metrics/timeseries"):
+            await w.sendJSON(.ok, app.timeseriesPayload(window: req.query["window"]), headers: cors)
+        case (.GET, "/v1/system/memory"):
+            await w.sendJSON(.ok, app.memoryPayload(), headers: cors)
+        case (.GET, "/v1/system/models"):
+            await w.sendJSON(.ok, app.modelsPayload(), headers: cors)
+        case (.POST, "/v1/system/model"):
+            let model = JSON.object(req.body)?["model"] as? String
+            let r = await app.setModel(model)
+            await w.sendJSON(r.ok ? .ok : .unprocessableEntity, ["ok": r.ok, "detail": r.detail], headers: cors)
         case (.GET, "/"), (.GET, "/health"), (.HEAD, "/health"):
             await w.sendJSON(.ok, app.healthPayload(), headers: cors)
         case (.GET, "/v1/hardware-profile"):
@@ -241,6 +257,26 @@ final class InferenceGateway {
         default:
             await passthrough(req, w, cors: cors)
         }
+    }
+
+    /// Serves the TypeScript dashboard (web/dist) with path-traversal protection.
+    private func serveStatic(_ relative: String, _ w: ResponseWriter) async {
+        guard let root = AppPaths.webRoot?.standardizedFileURL else {
+            await w.send(status: .notFound, headers: [("Content-Type", "text/plain; charset=utf-8")],
+                         body: Data("Dashboard no instalado (falta web/dist)".utf8))
+            return
+        }
+        let clean = relative.removingPercentEncoding ?? relative
+        let file = (clean.isEmpty ? root.appendingPathComponent("index.html") : root.appendingPathComponent(clean)).standardizedFileURL
+        guard file.path.hasPrefix(root.path + "/"), let data = try? Data(contentsOf: file) else {
+            await w.send(status: .notFound, headers: [("Content-Type", "text/plain")], body: Data("not found".utf8))
+            return
+        }
+        let types = ["html": "text/html; charset=utf-8", "js": "text/javascript; charset=utf-8", "css": "text/css; charset=utf-8",
+                     "svg": "image/svg+xml", "json": "application/json", "png": "image/png", "ico": "image/x-icon", "map": "application/json"]
+        await w.send(status: .ok, headers: [("Content-Type", types[file.pathExtension] ?? "application/octet-stream"),
+                                           ("Cache-Control", "no-cache"),
+                                           ("X-Content-Type-Options", "nosniff")], body: data)
     }
 
     private func originAllowed(_ origin: String) -> Bool {

@@ -29,6 +29,28 @@ struct LoadedModel: Codable, Equatable {
     var sizeVRAMBytes: UInt64
     var weightsBytes: UInt64    // model file size from /api/tags
     var kvCacheBytes: UInt64 { sizeBytes > weightsBytes ? sizeBytes - weightsBytes : 0 }
+
+    enum CodingKeys: String, CodingKey { case name, sizeBytes, sizeVRAMBytes, weightsBytes, contextLength, expiresAt, kvCacheBytes }
+    init(name: String, sizeBytes: UInt64, sizeVRAMBytes: UInt64, weightsBytes: UInt64, contextLength: Int?, expiresAt: String?) {
+        self.name = name; self.sizeBytes = sizeBytes; self.sizeVRAMBytes = sizeVRAMBytes
+        self.weightsBytes = weightsBytes; self.contextLength = contextLength; self.expiresAt = expiresAt
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        sizeBytes = try c.decode(UInt64.self, forKey: .sizeBytes)
+        sizeVRAMBytes = try c.decode(UInt64.self, forKey: .sizeVRAMBytes)
+        weightsBytes = try c.decode(UInt64.self, forKey: .weightsBytes)
+        contextLength = try c.decodeIfPresent(Int.self, forKey: .contextLength)
+        expiresAt = try c.decodeIfPresent(String.self, forKey: .expiresAt)
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name); try c.encode(sizeBytes, forKey: .sizeBytes)
+        try c.encode(sizeVRAMBytes, forKey: .sizeVRAMBytes); try c.encode(weightsBytes, forKey: .weightsBytes)
+        try c.encodeIfPresent(contextLength, forKey: .contextLength); try c.encodeIfPresent(expiresAt, forKey: .expiresAt)
+        try c.encode(kvCacheBytes, forKey: .kvCacheBytes)
+    }
     var contextLength: Int?
     var expiresAt: String?
 }
@@ -258,7 +280,9 @@ final class OllamaProcessManager {
         let oldEnv = OllamaProcessManager.environment(plan: plan, config: config)
         let newEnv = OllamaProcessManager.environment(plan: newPlan, config: newConfig)
         let modelChanged = newPlan.model != plan.model
-        if modelChanged && newConfig.autoPull { _ = await pull(newPlan.model) }
+        let installed = installedBox.get()
+        let isInstalled = installed[newPlan.model] != nil || installed[newPlan.model + ":latest"] != nil
+        if modelChanged && newConfig.autoPull && !isInstalled { _ = await pull(newPlan.model) }
         if oldEnv == newEnv {
             plan = newPlan; config = newConfig
             if modelChanged { await prepareModel() }
