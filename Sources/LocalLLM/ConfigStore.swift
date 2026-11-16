@@ -41,6 +41,8 @@ struct MemoryGuardConfig: Codable, Equatable {
     var recoverySeconds: Double
     var retryAfterSeconds: Int
     var purgeIdleModelOnPressure: Bool
+    /// Fraction of the threshold that opens the breaker while kernel pressure is "normal" (nil = 0.5).
+    var normalPressureFloorFraction: Double?
 }
 
 struct RoutingConfig: Codable, Equatable {

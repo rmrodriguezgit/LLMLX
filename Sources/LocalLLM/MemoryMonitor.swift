@@ -103,8 +103,13 @@ final class MemoryMonitor {
         var open = wasOpen
         let critical = pressureLevel == "critical"
         let warningLow = pressureLevel == "warning" && s.availableBytes < threshold + threshold / 2
+        // With kernel pressure "normal" the compressor still has room: the model's own resident memory
+        // pushes "available" under the threshold on every generation. Only a hard floor opens the breaker
+        // then; otherwise every request ended with a model purge and a ~4 GB reload on the next one.
+        let floor = UInt64(Double(threshold) * min(1, max(0, config.normalPressureFloorFraction ?? 0.5)))
+        let lowRAM = s.availableBytes < (pressureLevel == "normal" ? floor : threshold)
         if !wasOpen {
-            if s.availableBytes < threshold || critical || warningLow {
+            if lowRAM || critical || warningLow {
                 open = true
                 healthySince = nil
             }

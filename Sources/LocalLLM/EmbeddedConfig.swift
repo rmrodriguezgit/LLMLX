@@ -34,7 +34,8 @@ enum EmbeddedConfig {
     "hysteresisGB": 0.7,
     "recoverySeconds": 5,
     "retryAfterSeconds": 5,
-    "purgeIdleModelOnPressure": true
+    "purgeIdleModelOnPressure": true,
+    "normalPressureFloorFraction": 0.5
   },
   "routing": {
     "aliases": {
