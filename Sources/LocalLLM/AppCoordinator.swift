@@ -229,30 +229,49 @@ final class AppCoordinator {
     /// Ollama), waits for its SIGUSR1 "ready", then drains in-flight requests and exits.
     func performBlueGreenRestart(binary: URL, commit: String, version: String? = nil) async -> Bool {
         guard mode == .app || mode == .headless else { return false }
-        let p = Process()
-        p.executableURL = binary
-        p.arguments = mode == .headless ? ["--headless"] : []
-        var env = ProcessInfo.processInfo.environment
-        env["LOCALLLM_TAKEOVER"] = "1"
-        env["LOCALLLM_PARENT_PID"] = String(getpid())
-        env["LOCALLLM_COMMIT"] = commit
-        env["LOCALLLM_REDIRECTED"] = "1"
+        var env: [String: String] = [
+            "LOCALLLM_TAKEOVER": "1",
+            "LOCALLLM_PARENT_PID": String(getpid()),
+            "LOCALLLM_COMMIT": commit,
+            "LOCALLLM_REDIRECTED": "1",
+        ]
         if let version { env["LOCALLLM_VERSION"] = version }
         if let b = AppEnvironment.appBundleURL { env["LOCALLLM_APP_BUNDLE"] = b.path }
         if let r = AppEnvironment.resourcesURL { env["LOCALLLM_RESOURCES"] = r.path }
-        p.environment = env
-        p.standardInput = FileHandle.nullDevice
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
+
+        // Menu bar app + bundled build: open it through LaunchServices (a plain child process
+        // would run without a menu bar icon). Headless or loose binaries keep using Process.
+        let bundle = mode == .app ? BundleLauncher.bundle(containing: binary) : nil
+        var child: Process?
+        var childApp: NSRunningApplication?
+        var childPid: Int32 = 0
 
         let ready: Bool = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
             handoffLock.lock(); handoffContinuation = c; handoffLock.unlock()
-            do { try p.run() } catch {
-                handoffLock.lock(); handoffContinuation = nil; handoffLock.unlock()
+            let failStart = {
+                self.handoffLock.lock(); self.handoffContinuation = nil; self.handoffLock.unlock()
                 c.resume(returning: false)
-                return
             }
-            Log.info("handoff", "Started new instance pid \(p.processIdentifier) (\(commit.prefix(8))); waiting for ready signal")
+            if let bundle {
+                guard let app = BundleLauncher.open(bundle: bundle, environment: env,
+                                                    arguments: mode == .headless ? ["--headless"] : []) else { failStart(); return }
+                childApp = app
+                childPid = app.processIdentifier
+            } else {
+                let p = Process()
+                p.executableURL = binary
+                p.arguments = mode == .headless ? ["--headless"] : []
+                var full = ProcessInfo.processInfo.environment
+                env.forEach { full[$0.key] = $0.value }
+                p.environment = full
+                p.standardInput = FileHandle.nullDevice
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                do { try p.run() } catch { failStart(); return }
+                child = p
+                childPid = p.processIdentifier
+            }
+            Log.info("handoff", "Started new instance pid \(childPid) (\(commit.prefix(8)))\(bundle != nil ? " via LaunchServices" : ""); waiting for ready signal")
             DispatchQueue.global().asyncAfter(deadline: .now() + 90) { [weak self] in
                 guard let self else { return }
                 self.handoffLock.lock()
@@ -263,11 +282,12 @@ final class AppCoordinator {
             }
         }
         guard ready else {
-            if p.isRunning { p.terminate() }
+            if let child, child.isRunning { child.terminate() }
+            if let childApp, !childApp.isTerminated { childApp.forceTerminate() }
             tracker.incident("handoff-failed", "new instance \(commit.prefix(8)) did not signal ready")
             return false
         }
-        tracker.incident("handoff", "new instance \(commit.prefix(8)) pid \(p.processIdentifier) took over; draining")
+        tracker.incident("handoff", "new instance \(commit.prefix(8)) pid \(childPid) took over; draining")
         await shutdown(handoff: true)
         exit(0)
     }
@@ -383,15 +403,40 @@ enum Launcher {
               FileManager.default.isExecutableFile(atPath: path),
               AppEnvironment.executableURL.path != URL(fileURLWithPath: path).resolvingSymlinksInPath().path else { return }
         // A newer .dmg install has a different bundled commit, so stale updates are ignored.
-        setenv("LOCALLLM_REDIRECTED", "1", 1)
-        setenv("LOCALLLM_COMMIT", commit, 1)
-        if let v = meta["version"] as? String { setenv("LOCALLLM_VERSION", v, 1) }
-        if let b = AppEnvironment.appBundleURL { setenv("LOCALLLM_APP_BUNDLE", b.path, 1) }
-        if let r = AppEnvironment.resourcesURL { setenv("LOCALLLM_RESOURCES", r.path, 1) }
-        Log.info("launcher", "Executing auto-updated binary \(path) (\(commit.prefix(8)))")
-        var args: [UnsafeMutablePointer<CChar>?] = ([path] + CommandLine.arguments.dropFirst()).map { strdup($0) }
+        var childEnv: [String: String] = ["LOCALLLM_REDIRECTED": "1", "LOCALLLM_COMMIT": commit]
+        if let v = meta["version"] as? String { childEnv["LOCALLLM_VERSION"] = v }
+        if let b = AppEnvironment.appBundleURL { childEnv["LOCALLLM_APP_BUNDLE"] = b.path }
+        if let r = AppEnvironment.resourcesURL { childEnv["LOCALLLM_RESOURCES"] = r.path }
+
+        // Updates are .app bundles opened through LaunchServices (see BundleLauncher: with execv the
+        // menu bar icon never shows). Loose binaries from older updaters are wrapped on the fly.
+        var exe = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        if BundleLauncher.bundle(containing: exe) == nil {
+            let dest = exe.deletingLastPathComponent().appendingPathComponent(exe.lastPathComponent + ".app")
+            do {
+                exe = try BundleLauncher.makeBundle(binary: exe, at: dest, baseBundle: AppEnvironment.appBundleURL,
+                                                    version: meta["version"] as? String)
+                var updated = meta
+                updated["path"] = exe.path
+                if let d = try? JSONSerialization.data(withJSONObject: updated) { try? d.write(to: AppPaths.currentBinaryMeta, options: .atomic) }
+                Log.info("launcher", "Wrapped legacy binary into \(dest.lastPathComponent)")
+            } catch {
+                Log.error("launcher", "Cannot wrap \(path) into an .app: \(error.localizedDescription)")
+            }
+        }
+        if let bundle = BundleLauncher.bundle(containing: exe),
+           let app = BundleLauncher.open(bundle: bundle, environment: childEnv, arguments: Array(CommandLine.arguments.dropFirst())) {
+            Log.info("launcher", "Opened auto-updated bundle \(bundle.lastPathComponent) (\(commit.prefix(8))) pid \(app.processIdentifier)")
+            Log.flush()
+            exit(0)
+        }
+
+        // Last resort: exec the binary in place (runs, but without a menu bar icon).
+        childEnv.forEach { setenv($0.key, $0.value, 1) }
+        Log.info("launcher", "Executing auto-updated binary \(exe.path) (\(commit.prefix(8)))")
+        var args: [UnsafeMutablePointer<CChar>?] = ([exe.path] + CommandLine.arguments.dropFirst()).map { strdup($0) }
         args.append(nil)
-        execv(path, &args)
+        execv(exe.path, &args)
         Log.error("launcher", "execv failed (\(errno)); continuing with bundled binary")
     }
 }
