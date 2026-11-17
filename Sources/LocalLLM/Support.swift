@@ -130,6 +130,8 @@ enum Log {
     static func info(_ category: String, _ message: String) { write(.info, category, message) }
     static func warn(_ category: String, _ message: String) { write(.default, category, "WARN " + message) }
     static func error(_ category: String, _ message: String) { write(.error, category, "ERROR " + message) }
+    /// Waits for pending file writes (use before `exit`).
+    static func flush() { queue.sync {} }
 
     private static func write(_ type: OSLogType, _ category: String, _ message: String) {
         Logger(subsystem: subsystem, category: category).log(level: type, "\(message, privacy: .public)")
