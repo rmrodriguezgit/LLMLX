@@ -12,8 +12,10 @@ enum Entry {
             let port = args.firstIndex(of: "--port").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } ?? 0
             runHeadless(.healthCheck(port: port))
         }
-        if args.contains("--headless") { runHeadless(.headless) }
-        Launcher.redirectIfUpdated()
+        let headless = args.contains("--headless")
+        if !headless { Launcher.redirectIfUpdated() }
+        InstanceLock.acquireOrExit()
+        if headless { runHeadless(.headless) }
         LocalLLMApp.main()
     }
 
