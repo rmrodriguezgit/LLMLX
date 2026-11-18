@@ -90,6 +90,57 @@ Desde el menú (clic en el nombre del modelo) o desde **Perfil de hardware → E
 
 Si una app pide un modelo instalado por su nombre exacto (por ejemplo `qwen3.5:4b`), se respeta ese nombre. El menú lo indica con *"Última petición usó: …"* y la línea *"En memoria:"* muestra lo que realmente está cargado en la GPU.
 
+### Proveedores LLM: Ollama local, LocalIA, ChatGPT, Claude…
+
+Abre **Proveedores LLM** en el panel (`http://127.0.0.1:11500/dashboard/#/proveedores`). Ahí puedes añadir, probar y activar proveedores sin recompilar ni reinstalar la app:
+
+| Tipo | Para qué | URL base típica |
+|---|---|---|
+| `ollama` | El Ollama embebido en este Mac (id `local`, siempre activo) | — |
+| `openai` | Cualquier API compatible con OpenAI: ChatGPT, **LocalIA** (servidor Ubuntu), LM Studio, vLLM, OpenRouter, otro Ollama (`http://host:11434/v1`) | `https://api.openai.com/v1`, `https://192.168.4.59:8443/v1` |
+| `anthropic` | Claude con la API nativa de Messages | `https://api.anthropic.com` |
+
+Cómo se elige el destino de cada petición:
+
+- `"model": "claude/claude-opus-5-5"`, `"openai/gpt-5"`, `"localia/qwen3:8b"` → ese proveedor y modelo.
+- `"model": "claude"` → el modelo predeterminado de ese proveedor.
+- Un modelo que aparece en la lista de un proveedor activo (`"claude-opus-5-5"`) → ese proveedor.
+- `"default"`, sin modelo o un alias (`gpt-4o`…) → el **proveedor predeterminado** (por defecto, `local`).
+- `"local/…"` o cualquier otro nombre → Ollama en este Mac, como antes.
+
+Los formatos se traducen solos: una app que habla OpenAI (`/v1/chat/completions`) u Ollama (`/api/chat`, `/api/generate`) puede usar Claude, con streaming, herramientas (*tool calling*), imágenes y razonamiento; y las métricas registran tokens, TTFT y tok/s igual que en local. `GET /v1/models` incluye los modelos remotos como `<id>/<modelo>`. Las peticiones remotas no ocupan slots de Ollama ni las bloquea el breaker de memoria.
+
+La configuración vive en `~/Library/Application Support/LocalLLM/providers.json` (permisos 600, fuera de Git porque guarda las claves). Si lo editas a mano, se aplica en la siguiente petición. Ejemplo:
+
+```json
+{
+  "version": 1,
+  "defaultProvider": "local",
+  "providers": [
+    { "id": "local", "type": "ollama", "name": "Ollama en este Mac", "enabled": true },
+    { "id": "localia", "type": "openai", "name": "LocalIA", "enabled": true,
+      "baseUrl": "https://127.0.0.1:8443/v1", "apiKey": "<clave de LocalIA>", "defaultModel": "qwen3:8b",
+      "caCertPath": "~/.localia/localia-root-ca.crt" },
+    { "id": "openai", "type": "openai", "name": "ChatGPT", "enabled": true,
+      "baseUrl": "https://api.openai.com/v1", "apiKey": "sk-…", "defaultModel": "gpt-5" },
+    { "id": "claude", "type": "anthropic", "name": "Claude", "enabled": true,
+      "apiKey": "sk-ant-…", "defaultModel": "claude-opus-5-5", "models": ["claude-sonnet-5-5", "claude-haiku-5-5"] }
+  ]
+}
+```
+
+Campos opcionales: `models` (más modelos para los selectores), `headers` (cabeceras extra), `caCertPath` (CA propia, p. ej. la de LocalIA), `allowInsecureTLS` (solo pruebas), `timeoutSeconds`, `maxTokens` (Claude exige `max_tokens`; por defecto 16000, o 64000 en streaming) y `refusalFallbacks` (en Claude Opus 5.5, Sonnet 5.5, Opus 5 y Fable 5.x activa el reintento automático del servidor cuando el modelo rechaza una petición; ponlo en `false` para desactivarlo).
+
+Seguridad: la API nunca devuelve las claves (solo `…abcd`). Solo el propio panel o clientes sin cabecera `Origin` pueden cambiar proveedores. Si cambias la URL base o el tipo de un proveedor, debes volver a escribir su clave para que no pueda redirigirse a otro servidor.
+
+**LocalIA desde fuera de su red:** el puerto 8443 solo escucha en `192.168.4.59`. Desde otra red, abre un túnel por Tailscale y usa `https://127.0.0.1:8443/v1` (el certificado también es válido para `127.0.0.1` y `localhost`):
+
+```bash
+ssh -N -L 8443:192.168.4.59:8443 salaf008@100.87.109.82
+```
+
+Copia la CA del servidor (`localia-root-ca.crt`) a este Mac e indica su ruta en **Certificado CA**. La clave de LocalIA se crea con `POST /api/v1/admin/keys` en el servidor.
+
 ### ¿Para qué sirve la parte de Git?
 
 Git sirve para que **tu app instalada se mantenga al día sola**, sin reinstalar el `.dmg`:
@@ -208,6 +259,8 @@ LLMLX/
     ├── OllamaProcessManager.swift     # Proceso hijo supervisado, env por perfil, pull/warmup/unload
     ├── GitAutoUpdater.swift           # Sync, build en E-cores, health-check, swap atómico, rollback
     ├── ConfigStore.swift              # Esquema + validación + hot-reload de profiles.json
+    ├── ProviderStore.swift            # providers.json: proveedores LLM, enrutado, TLS con CA propia
+    ├── ProviderProxy.swift            # Traducción OpenAI ↔ Anthropic ↔ Ollama (streaming, tools, uso)
     ├── EmbeddedConfig.swift           # Copia embebida de profiles.json (último recurso)
     └── Support.swift                  # Paths, logging, ProcessRunner, JSON, Locked<T>
 ```
@@ -222,6 +275,7 @@ Archivos en tiempo de ejecución (`~/Library/Application Support/LocalLLM/`):
 | `ollama.pid.json` | PID y hash de configuración del Ollama gestionado (para adoptarlo en el hand-off) |
 | `updater-state.json` | Último commit, último resultado y commits marcados como malos |
 | `model-override.json` | Modelo elegido manualmente (si existe) |
+| `providers.json` | Proveedores LLM (Ollama local, LocalIA, OpenAI, Claude…) y sus claves; permisos 600 |
 
 Logs en `~/Library/Logs/LocalLLM/`: `localllm.log`, `ollama.log` y `auto-update-build.log`.
 
@@ -265,6 +319,9 @@ Base URL: `http://127.0.0.1:11500`
 | GET | `/v1/system/memory` | Memoria en vivo + historial de 15 min |
 | GET | `/v1/system/models` | Modelo activo, automático, elegido, instalados y cargados |
 | POST | `/v1/system/model` | `{"model": "qwen3.5:4b"}` elige modelo; `{"model": null}` vuelve a automático |
+| GET | `/v1/system/providers` | Proveedores LLM configurados (claves enmascaradas) |
+| PUT | `/v1/system/providers` | Reemplaza la configuración de proveedores (`{"defaultProvider": …, "providers": […]}`) |
+| POST | `/v1/system/providers/test` | `{"id": "claude"}` o `{"provider": {…}}`: prueba la conexión y lista modelos |
 
 Cabeceras opcionales:
 - `X-Client-App: mi-agente` identifica al cliente en las métricas. Sin ella se usa el producto del `User-Agent`.

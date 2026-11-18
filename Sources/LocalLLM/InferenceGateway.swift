@@ -201,7 +201,7 @@ final class InferenceGateway {
     private let children = Locked<[ObjectIdentifier: Channel]>([:])
     private let activeRequests = Locked<Int>(0)
     private let upstream: URLSession
-    private unowned let app: AppCoordinator
+    unowned let app: AppCoordinator
 
     var maxBodyBytes: Int { app.config.current.gateway.maxRequestBodyMB * 1_048_576 }
     var inFlight: Int { activeRequests.get() }
@@ -269,7 +269,7 @@ final class InferenceGateway {
             let requested = req.headers.first(name: "Access-Control-Request-Headers")
             let allowHeaders = (requested?.isEmpty == false) ? requested! : "Authorization, Content-Type, X-Client-App, X-Priority"
             await w.send(status: .noContent, headers: cors + [
-                ("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"),
+                ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
                 ("Access-Control-Allow-Headers", allowHeaders),
                 ("Access-Control-Max-Age", "86400")], body: Data())
             return
@@ -303,6 +303,36 @@ final class InferenceGateway {
             await w.sendJSON(report.outcome == "rebuilding" ? .accepted : .ok, JSON.dictionary(report), headers: cors)
         case (.GET, "/v1/system/git-status"):
             await w.sendJSON(.ok, JSON.dictionary(app.updater.status), headers: cors)
+        case (.GET, "/v1/system/providers"):
+            await w.sendJSON(.ok, app.providers.payload(), headers: cors)
+        case (.PUT, "/v1/system/providers"), (.POST, "/v1/system/providers"):
+            guard sameOrigin(req) else {
+                await w.sendJSON(.forbidden, ["ok": false, "detail": "solo el panel de LocalLLM o clientes sin Origin pueden cambiar proveedores"], headers: cors)
+                return
+            }
+            do {
+                let f = try app.providers.replace(with: JSON.object(req.body) ?? [:])
+                app.tracker.incident("providers-updated", "default=\(f.defaultProvider) enabled=\(f.providers.filter { $0.enabled }.map { $0.id }.joined(separator: ","))")
+                await w.sendJSON(.ok, app.providers.payload().merging(["ok": true]) { $1 }, headers: cors)
+            } catch {
+                await w.sendJSON(.unprocessableEntity, ["ok": false, "detail": error.localizedDescription], headers: cors)
+            }
+        case (.POST, "/v1/system/providers/test"):
+            guard sameOrigin(req) else { await w.sendJSON(.forbidden, ["ok": false, "detail": "origen no permitido"], headers: cors); return }
+            do {
+                let p = try app.providers.draft(from: JSON.object(req.body) ?? [:])
+                if p.isLocal {
+                    let names = app.ollama.installedModels.keys.sorted()
+                    await w.sendJSON(.ok, ["ok": true, "status": 200, "models": names, "detail": "Ollama local: \(names.count) modelo(s)"], headers: cors)
+                } else {
+                    let r = await listRemoteModels(p)
+                    await w.sendJSON(.ok, ["ok": r.ok, "status": r.status, "models": r.models, "detail": r.detail], headers: cors)
+                }
+            } catch {
+                await w.sendJSON(.unprocessableEntity, ["ok": false, "detail": error.localizedDescription], headers: cors)
+            }
+        case (.GET, "/v1/models"):
+            await modelList(req, w, cors: cors)
         case (.POST, "/v1/system/reload-config"):
             let result = await app.reloadConfig(reason: "api")
             await w.sendJSON(result.ok ? .ok : .unprocessableEntity, ["ok": result.ok, "detail": result.detail], headers: cors)
@@ -331,6 +361,21 @@ final class InferenceGateway {
         await w.send(status: .ok, headers: [("Content-Type", types[file.pathExtension] ?? "application/octet-stream"),
                                            ("Cache-Control", "no-cache"),
                                            ("X-Content-Type-Options", "nosniff")], body: data)
+    }
+
+    /// Provider settings hold API keys: only the dashboard itself (same origin) or non-browser clients may change them.
+    private func sameOrigin(_ req: GatewayRequest) -> Bool {
+        guard let origin = req.headers.first(name: "Origin") else { return true }
+        guard let host = req.headers.first(name: "Host") else { return false }
+        return origin == "http://\(host)"
+    }
+
+    private func modelList(_ req: GatewayRequest, _ w: ResponseWriter, cors: [(String, String)]) async {
+        var data = Data(#"{"object":"list","data":[]}"#.utf8)
+        var up = URLRequest(url: app.ollama.baseURL.appendingPathComponent("v1/models"))
+        up.timeoutInterval = 10
+        if let (d, resp) = try? await upstream.data(for: up), (resp as? HTTPURLResponse)?.statusCode ?? 500 < 400 { data = d }
+        await w.send(status: .ok, headers: cors + [("Content-Type", "application/json")], body: mergedModelList(local: data))
     }
 
     private func originAllowed(_ origin: String) -> Bool {
@@ -367,7 +412,14 @@ final class InferenceGateway {
             return
         }
         let requested = json["model"] as? String
-        let model = app.resolveModel(requested)
+        let model: String
+        switch app.route(requested) {
+        case .remote(let provider, let remoteModel):
+            await remoteInference(req, w, kind: kind, json: json, provider: provider, model: remoteModel, cors: cors, start: start)
+            return
+        case .local(let m):
+            model = m
+        }
         json["model"] = model
         let stream = (json["stream"] as? Bool) ?? kind.defaultStream
 
@@ -487,11 +539,11 @@ final class InferenceGateway {
         app.tracker.record(record)
     }
 
-    private func contentType(_ resp: URLResponse) -> String {
+    func contentType(_ resp: URLResponse) -> String {
         (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "application/json"
     }
 
-    private func sendError(_ w: ResponseWriter, _ kind: EndpointKind?, _ status: HTTPResponseStatus, _ message: String, _ headers: [(String, String)]) async {
+    func sendError(_ w: ResponseWriter, _ kind: EndpointKind?, _ status: HTTPResponseStatus, _ message: String, _ headers: [(String, String)]) async {
         let body: [String: Any]
         if kind?.isOpenAI ?? false {
             let type = status == .tooManyRequests ? "rate_limit_error" : (status.code >= 500 ? "server_error" : "invalid_request_error")
@@ -505,6 +557,22 @@ final class InferenceGateway {
     // MARK: Pass-through proxy (tags, show, ps, embeddings, models, pull, ...)
 
     private func passthrough(_ req: GatewayRequest, _ w: ResponseWriter, cors: [(String, String)]) async {
+        if req.path.hasPrefix("/v1/"), var obj = JSON.object(req.body), let m = obj["model"] as? String,
+           case .remote(let p, let rm) = app.route(m) {
+            guard p.type == .openai, let base = p.resolvedBaseURL else {
+                await sendError(w, nil, .badRequest, "\(req.path) no está disponible para el proveedor \(p.id)", cors); return
+            }
+            obj["model"] = rm
+            let up = makeRequest(p, url: base.appendingPathComponent(String(req.path.dropFirst(4))), body: obj)
+            do {
+                let (data, resp) = try await app.providers.session(for: p).data(for: up)
+                await w.send(status: HTTPResponseStatus(statusCode: (resp as? HTTPURLResponse)?.statusCode ?? 502),
+                             headers: cors + [("Content-Type", contentType(resp)), ("X-LocalLLM-Provider", p.id)], body: data)
+            } catch {
+                await sendError(w, nil, .badGateway, "\(p.name) no disponible: \(error.localizedDescription)", cors)
+            }
+            return
+        }
         guard var comps = URLComponents(url: app.ollama.baseURL, resolvingAgainstBaseURL: false) else { return }
         let parts = req.uri.split(separator: "?", maxSplits: 1)
         comps.path = String(parts.first ?? "/")
