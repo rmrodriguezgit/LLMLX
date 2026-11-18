@@ -112,14 +112,16 @@ function providerCard(p: ProviderInfo, i: number): string {
       ${field(i, "defaultModel", "Modelo predeterminado", p.defaultModel ?? "", "mono")}
       ${field(i, "models", "Otros modelos (separados por coma)", (p.models ?? []).join(", "), "mono")}
       ${field(i, "caCertPath", "Certificado CA (PEM, opcional)", p.caCertPath ?? "", "mono", "~/localia-root-ca.crt")}
-      <label class="think-toggle"><input type="checkbox" data-i="${i}" data-k="allowInsecureTLS" ${p.allowInsecureTLS ? "checked" : ""}> No verificar TLS (solo pruebas en red de confianza)</label>
-      ${p.hasApiKey ? `<label class="think-toggle"><input type="checkbox" data-i="${i}" data-k="clearApiKey" ${p.clearApiKey ? "checked" : ""}> Borrar la clave guardada</label>` : ""}
+      <div class="prov-checks">
+        <label class="prov-check"><input type="checkbox" data-i="${i}" data-k="allowInsecureTLS" ${p.allowInsecureTLS ? "checked" : ""}><span>No verificar TLS <span class="muted">(solo pruebas en red de confianza)</span></span></label>
+        ${p.hasApiKey ? `<label class="prov-check"><input type="checkbox" data-i="${i}" data-k="clearApiKey" ${p.clearApiKey ? "checked" : ""}><span>Borrar la clave guardada</span></label>` : ""}
+      </div>
     </div>
     <div class="prov-actions">
       <button type="button" class="btn btn-small" data-act="test" data-i="${i}">Probar conexión</button>
       <button type="button" class="btn btn-small btn-danger" data-act="remove" data-i="${i}">Eliminar</button>
     </div>
-    ${test ? `<p class="small">${test}</p>` : ""}`;
+    ${test ? `<p class="small prov-test">${test}</p>` : ""}`;
   return card(p.name || p.id, body, { sub: `${TYPE_LABEL[p.type]} · modelo: ${p.id}/${p.defaultModel || "…"}` });
 }
 

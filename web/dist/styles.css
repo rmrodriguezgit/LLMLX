@@ -447,6 +447,11 @@ body[data-route="chat"] .content-inner { height: 100%; }
 .prov-add { display: flex; gap: 8px; margin-top: 10px; }
 .prov-add select { flex: 1; }
 .prov-notice { margin: 0 0 12px; }
+/* Checkboxes take the full row and wrap: long labels must never leave the card */
+.prov-checks { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
+.prov-check { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; min-width: 0; overflow-wrap: anywhere; }
+.prov-check input { margin: 2px 0 0; flex: none; }
+.prov-test { overflow-wrap: anywhere; }
 .btn-ghost { background: transparent; color: var(--accent); }
 .btn-danger { color: var(--critical-text); border-color: var(--critical-text); }
 .btn-danger:hover:not(:disabled) { background: var(--critical-text); color: #fff; }
