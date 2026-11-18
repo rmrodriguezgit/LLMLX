@@ -200,8 +200,8 @@ final class InferenceGateway {
     private var serverChannel: Channel?
     private let children = Locked<[ObjectIdentifier: Channel]>([:])
     private let activeRequests = Locked<Int>(0)
-    private let upstream: URLSession
-    private unowned let app: AppCoordinator
+    let upstream: URLSession
+    unowned let app: AppCoordinator
 
     var maxBodyBytes: Int { app.config.current.gateway.maxRequestBodyMB * 1_048_576 }
     var inFlight: Int { activeRequests.get() }
@@ -288,6 +288,22 @@ final class InferenceGateway {
             await w.sendJSON(.ok, app.memoryPayload(), headers: cors)
         case (.GET, "/v1/system/models"):
             await w.sendJSON(.ok, app.modelsPayload(), headers: cors)
+        case (.GET, "/v1/system/providers"):
+            await w.sendJSON(.ok, app.providersPayload(), headers: cors)
+        case (.POST, "/v1/system/providers"):
+            let r = await app.upsertProvider(req.body)
+            await w.sendJSON(r.ok ? .ok : .unprocessableEntity, ["ok": r.ok, "detail": r.detail], headers: cors)
+        case (.DELETE, let p) where p.hasPrefix("/v1/system/providers/"):
+            let r = app.removeProvider(String(p.dropFirst("/v1/system/providers/".count)))
+            await w.sendJSON(r.ok ? .ok : .notFound, ["ok": r.ok, "detail": r.detail], headers: cors)
+        case (.GET, let p) where p.hasPrefix("/v1/system/providers/") && p.hasSuffix("/models"):
+            let id = String(p.dropFirst("/v1/system/providers/".count).dropLast("/models".count))
+            let r = await app.discoverModels(id)
+            await w.sendJSON(r.ok ? .ok : .badGateway, ["ok": r.ok, "models": r.models, "detail": r.detail], headers: cors)
+        case (.GET, "/v1/models"):
+            await listModels(w, cors: cors)
+        case (.POST, "/v1/embeddings"):
+            await embeddings(req, w, cors: cors)
         case (.POST, "/v1/system/model"):
             let model = JSON.object(req.body)?["model"] as? String
             let r = await app.setModel(model)
@@ -367,9 +383,15 @@ final class InferenceGateway {
             return
         }
         let requested = json["model"] as? String
-        let model = app.resolveModel(requested)
-        json["model"] = model
         let stream = (json["stream"] as? Bool) ?? kind.defaultStream
+        let target = app.resolveTarget(requested)
+        if case .remote(let provider, let remoteModel) = target {
+            await remoteInference(req, w, kind: kind, json: json, provider: provider, model: remoteModel,
+                                  stream: stream, client: client, start: start, cors: cors)
+            return
+        }
+        let model = target.displayName
+        json["model"] = model
 
         var clientWantsUsage = false
         if kind.isOpenAI {
@@ -487,11 +509,11 @@ final class InferenceGateway {
         app.tracker.record(record)
     }
 
-    private func contentType(_ resp: URLResponse) -> String {
+    func contentType(_ resp: URLResponse) -> String {
         (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "application/json"
     }
 
-    private func sendError(_ w: ResponseWriter, _ kind: EndpointKind?, _ status: HTTPResponseStatus, _ message: String, _ headers: [(String, String)]) async {
+    func sendError(_ w: ResponseWriter, _ kind: EndpointKind?, _ status: HTTPResponseStatus, _ message: String, _ headers: [(String, String)]) async {
         let body: [String: Any]
         if kind?.isOpenAI ?? false {
             let type = status == .tooManyRequests ? "rate_limit_error" : (status.code >= 500 ? "server_error" : "invalid_request_error")
@@ -504,7 +526,7 @@ final class InferenceGateway {
 
     // MARK: Pass-through proxy (tags, show, ps, embeddings, models, pull, ...)
 
-    private func passthrough(_ req: GatewayRequest, _ w: ResponseWriter, cors: [(String, String)]) async {
+    func passthrough(_ req: GatewayRequest, _ w: ResponseWriter, cors: [(String, String)]) async {
         guard var comps = URLComponents(url: app.ollama.baseURL, resolvingAgainstBaseURL: false) else { return }
         let parts = req.uri.split(separator: "?", maxSplits: 1)
         comps.path = String(parts.first ?? "/")

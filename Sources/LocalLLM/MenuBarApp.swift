@@ -98,6 +98,9 @@ struct UISnapshot {
     var autoModel = ""
     var modelOverride: String?
     var installedModels: [String] = []
+    /// (provider name, ["provider/model", ...]) for each enabled remote API.
+    var remoteModels: [(name: String, models: [String])] = []
+    var activeIsRemote = false
     var loadedLine = ""
     var lastUsedModel: String?
     var displayVersion = ""
@@ -134,7 +137,10 @@ final class AppState: ObservableObject {
         s.hardwareLine = hw.summary
         s.gpuLine = "\(hw.performanceCores)P + \(hw.efficiencyCores)E CPU • \(hw.gpuCores.map { "\($0)-core GPU" } ?? "GPU")"
         s.profileLine = "\(plan.profileId) • ctx \(plan.numCtx) • ×\(plan.numParallel) • KV \(plan.kvCacheType)"
-        s.model = plan.model
+        let active = app.activeTarget
+        s.model = active.displayName
+        s.activeIsRemote = active.isRemote
+        s.remoteModels = app.providers.enabled.filter { !$0.models.isEmpty }.map { p in (p.name, p.models.map { "\(p.id)/\($0)" }) }
         s.engine = app.ollama.status.label
         s.totalBytes = max(1, mem.totalBytes)
         s.weightsBytes = loaded.reduce(0) { $0 + $1.weightsBytes }
@@ -238,13 +244,25 @@ struct MenuContentView: View {
                                 if s.modelOverride == name { Label(name, systemImage: "checkmark") } else { Text(name) }
                             }
                         }
+                        ForEach(s.remoteModels, id: \.name) { group in
+                            Divider()
+                            Section(group.name) {
+                                ForEach(group.models, id: \.self) { name in
+                                    Button {
+                                        state.selectModel(name)
+                                    } label: {
+                                        if s.modelOverride == name { Label(name, systemImage: "checkmark") } else { Text(name) }
+                                    }
+                                }
+                            }
+                        }
                     } label: {
                         Text(s.model).font(.system(.body, design: .monospaced))
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
-                    .help("Modelo por defecto para las peticiones que piden \"default\", \"local\" o un alias (gpt-4o…). Si una app pide un modelo instalado concreto, se usa ese.")
-                    Text(s.modelOverride == nil ? "auto" : "manual")
+                    .help("Modelo activo: lo reciben las peticiones que piden \"default\", \"local\" o un alias (gpt-4o…), sea local (Ollama) o una API remota. Las APIs se configuran en el panel → Perfil.")
+                    Text(s.activeIsRemote ? "API" : (s.modelOverride == nil ? "auto" : "manual"))
                         .font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Capsule().fill(Color.secondary.opacity(0.18)))
                 }

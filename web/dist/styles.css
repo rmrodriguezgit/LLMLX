@@ -430,3 +430,19 @@ body[data-route="chat"] .content-inner { height: 100%; }
   .chat-defs { grid-template-columns: 1fr; }
   .msg-user .bubble { max-width: 92%; }
 }
+
+/* Modelos y APIs */
+.big { font-size: 20px; font-weight: 650; margin: 4px 0 8px; word-break: break-all; }
+.notice { display: flex; gap: 8px; align-items: center; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-1); font-size: 13px; }
+.provider-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; font-size: 12px; color: var(--text-secondary); }
+.provider-form label { display: grid; gap: 4px; }
+.provider-form .wide { grid-column: 1 / -1; }
+.provider-form .row { display: flex; gap: 10px; align-items: center; }
+.provider-form .row .btn { margin-top: 0; }
+.provider-form label.check { display: flex; gap: 6px; align-items: center; grid-column: 1 / -1; }
+.provider-form input:not([type=checkbox]), .provider-form select, .provider-form textarea {
+  font: inherit; font-size: 13px; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text-primary); min-width: 0;
+}
+.provider-form input[readonly] { opacity: .7; }
+@media (max-width: 640px) { .provider-form { grid-template-columns: 1fr; } }

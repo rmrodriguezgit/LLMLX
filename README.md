@@ -70,6 +70,7 @@ Normalmente basta con `git push` a este repo. La app instalada revisa GitHub cad
 | **Chat** | Chat tipo ChatGPT con el modelo local: historial de conversaciones a la izquierda (agrupado por fecha, búsqueda, renombrar, eliminar), streaming con fase en vivo (procesando prompt / razonando / escribiendo), razonamiento plegable, selector de modelo, instrucciones del sistema, detener, regenerar, editar y reenviar. Cada respuesta muestra tok/s, TTFT, tokens de entrada y salida, duración y un desglose (cola, carga del modelo, evaluación del prompt, generación). Las conversaciones se guardan en el navegador |
 | **Métricas** | Peticiones, tokens de entrada y salida, tok/s, TTFT p50/p95, rechazos; gráficas por intervalo (1 h, 24 h, 7 d, 30 d); uso por modelo y por app; últimas peticiones; incidentes |
 | **Memoria** | Composición en vivo (pesos / KV-cache / macOS / libre) con la línea del umbral del breaker; RAM disponible y swap de los últimos 15 min; modelos cargados en Metal |
+| **Modelos y APIs** | Modelo activo (local o API), modelos de Ollama, modelos de APIs remotas y alta/edición de proveedores (OpenAI, Anthropic, Gemini, OpenRouter, Groq, Mistral, DeepSeek, xAI, LM Studio…) con botón "Descubrir modelos" |
 | **Perfil de hardware** | Chip, núcleos CPU/GPU, RAM, plan elegido y su justificación, presupuesto Metal, variables de Ollama y **selector de modelo** |
 | **Actualizaciones** | Explicación de Git, estado, último cambio recibido, versión en ejecución y botón "Buscar actualizaciones ahora" |
 
@@ -89,6 +90,30 @@ Desde el menú (clic en el nombre del modelo) o desde **Perfil de hardware → E
 - **Cualquier modelo instalado**: pasa a ser el destino de `"model": "default"`, `"local"` y de los alias (`gpt-4o`…). La elección se guarda y sobrevive a reinicios.
 
 Si una app pide un modelo instalado por su nombre exacto (por ejemplo `qwen3.5:4b`), se respeta ese nombre. El menú lo indica con *"Última petición usó: …"* y la línea *"En memoria:"* muestra lo que realmente está cargado en la GPU.
+
+### Usar una API remota (OpenAI, Claude, Gemini, OpenRouter…)
+
+LocalLLM también enruta a cualquier API **compatible con OpenAI**. Las apps no cambian nada: siguen apuntando a `http://127.0.0.1:11500` y pidiendo `"default"`; el gateway manda la petición al modelo **activo**, sea Qwen local o una API.
+
+1. Abre **Panel → Modelos y APIs → Añadir proveedor**, elige una plantilla (o escribe la Base URL), pega la API key y lista los modelos (o pulsa **Descubrir modelos**).
+2. Pulsa **Usar** junto a un modelo (`openai/gpt-4o-mini`, `anthropic/claude-sonnet-5-5`…), o elígelo en el menú de la barra.
+3. Listo: `default`, `local` y los alias (`gpt-4o`…) van a esa API. El motor local se descarga de la memoria mientras tanto. **Automático** vuelve a Qwen.
+
+| Proveedor | Base URL |
+|---|---|
+| OpenAI | `https://api.openai.com/v1` |
+| Anthropic | `https://api.anthropic.com/v1` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| OpenRouter | `https://openrouter.ai/api/v1` |
+| Groq | `https://api.groq.com/openai/v1` |
+| Mistral / DeepSeek / xAI | `https://api.mistral.ai/v1` · `https://api.deepseek.com/v1` · `https://api.x.ai/v1` |
+| LM Studio u otro servidor local | `http://127.0.0.1:1234/v1` (sin clave) |
+
+Reglas de enrutado (en orden): `default`/`local`/alias → modelo activo · nombre de un modelo de Ollama instalado → ese modelo local · `proveedor/modelo` → esa API · nombre suelo listado en un proveedor (`gpt-4o-mini`) → esa API · cualquier otro → modelo activo.
+
+Funciona en las dos APIs del gateway: `/v1/chat/completions` y `/v1/completions` se reenvían tal cual; `/api/chat` y `/api/generate` (librerías `ollama`, el chat del panel) se traducen ida y vuelta, incluidos streaming, imágenes, `format`/JSON schema, herramientas (`tools`/`tool_calls`) y razonamiento (`thinking`). `/v1/embeddings` va a la API si pides `proveedor/modelo`. Las peticiones remotas no pasan por el circuit breaker de RAM ni por la cola local, y se registran en las métricas con `timing_source = remote`.
+
+Las claves se guardan **solo en este Mac** (`~/Library/Application Support/LocalLLM/providers.json`, permisos 600). No se suben a Git ni las devuelve la API (solo los 4 últimos caracteres). La opción "variable de entorno" solo sirve si la app se lanza desde una terminal que la tenga definida (las apps abiertas desde el Finder no heredan tu `.zshrc`).
 
 ### ¿Para qué sirve la parte de Git?
 
@@ -204,6 +229,8 @@ LLMLX/
     ├── MemoryMonitor.swift            # host_statistics64 + vm.swapusage + memory pressure → breaker
     ├── AdmissionController.swift      # Cola de prioridad con timeout/cancelación
     ├── InferenceGateway.swift         # Servidor HTTP SwiftNIO, proxy streaming, endpoints sistema
+    ├── ProviderStore.swift            # APIs remotas (OpenAI-compatibles): alta, claves locales, enrutado
+    ├── RemoteInference.swift          # Reenvío a APIs + traducción Ollama nativo ↔ OpenAI
     ├── TokenTracker.swift             # SQLite WAL + extractor de usage (SSE/NDJSON)
     ├── OllamaProcessManager.swift     # Proceso hijo supervisado, env por perfil, pull/warmup/unload
     ├── GitAutoUpdater.swift           # Sync, build en E-cores, health-check, swap atómico, rollback
@@ -253,7 +280,8 @@ Base URL: `http://127.0.0.1:11500`
 |---|---|---|
 | POST | `/v1/chat/completions`, `/v1/completions` | OpenAI compatible (stream o no); con conteo de tokens |
 | POST | `/api/chat`, `/api/generate` | Ollama nativo; con conteo de tokens y tiempos del motor |
-| * | `/api/*`, `/v1/models`, `/v1/embeddings`… | Proxy transparente a Ollama |
+| GET | `/v1/models` | Modelos de Ollama + `default` + `proveedor/modelo` de cada API |
+| * | `/api/*`, `/v1/embeddings`… | Proxy transparente a Ollama (o a la API si el modelo es remoto) |
 | GET | `/v1/hardware-profile` | Hardware detectado, plan elegido, razones, env de Ollama, RAM actual |
 | GET | `/v1/metrics?window=1h\|24h\|7d\|session\|all` | Totales, por cliente/modelo/endpoint, p50/p95 TTFT y tok/s, últimas peticiones, incidentes |
 | POST | `/v1/system/git-sync` | Sincroniza ya (`200` si terminó; `202` si quedó compilando) |
@@ -264,7 +292,11 @@ Base URL: `http://127.0.0.1:11500`
 | GET | `/v1/metrics/timeseries?window=1h\|24h\|7d\|30d` | Series por intervalo para gráficas |
 | GET | `/v1/system/memory` | Memoria en vivo + historial de 15 min |
 | GET | `/v1/system/models` | Modelo activo, automático, elegido, instalados y cargados |
-| POST | `/v1/system/model` | `{"model": "qwen3.5:4b"}` elige modelo; `{"model": null}` vuelve a automático |
+| POST | `/v1/system/model` | `{"model": "qwen3.5:4b"}` o `{"model": "openai/gpt-4o-mini"}` elige el modelo activo; `{"model": null}` vuelve a automático |
+| GET | `/v1/system/providers` | APIs remotas configuradas (sin claves) |
+| POST | `/v1/system/providers` | Crea o actualiza `{"id","name","baseURL","apiKey","models":[…],"enabled"}`; `apiKey` vacío conserva la actual |
+| DELETE | `/v1/system/providers/{id}` | Elimina un proveedor y su clave |
+| GET | `/v1/system/providers/{id}/models` | Pregunta a la API su lista de modelos |
 
 Cabeceras opcionales:
 - `X-Client-App: mi-agente` identifica al cliente en las métricas. Sin ella se usa el producto del `User-Agent`.
@@ -303,7 +335,7 @@ LocalLLM expone dos APIs en `http://127.0.0.1:11500`:
 Reglas comunes a todos los lenguajes:
 
 - **API key**: no hace falta. Los SDK exigen que haya una, así que pon cualquier valor, por ejemplo `"local"`.
-- **Modelo**: usa `"default"`, `"local"` o cualquier alias de `routing.aliases`, como `gpt-4o`. Todos van al modelo que la app eligió para tu Mac (`qwen3:8b` en un M3 de 16 GB). Si pides el nombre exacto de un modelo instalado (`qwen2.5:7b`), se usa ese.
+- **Modelo**: usa `"default"`, `"local"` o cualquier alias de `routing.aliases`, como `gpt-4o`. Todos van al **modelo activo** de la Mac: el que eligió el profiler (`qwen3:8b` en un M3 de 16 GB), otro modelo local o una API remota ([ver arriba](#usar-una-api-remota-openai-claude-gemini-openrouter)). Si pides el nombre exacto de un modelo instalado (`qwen2.5:7b`) o `proveedor/modelo` (`openai/gpt-4o-mini`), se usa ese.
 - **`X-Client-App: nombre-de-tu-app`**: la recomiendo. Así tus peticiones aparecen separadas en `GET /v1/metrics`.
 - **`X-Priority: high | normal | low`**: es opcional. Usa `high` en la UI interactiva y `low` en los trabajos batch.
 - **Errores a manejar**:

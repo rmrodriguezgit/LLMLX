@@ -42,7 +42,8 @@ function layout(p: HardwareProfile, models: ModelsInfo): string {
 
   const plan = defs([
     ["Perfil", `<b>${esc(sel.profileId)}</b> <span class="muted">${esc(sel.profileDescription)}</span>`],
-    ["Modelo", `<span class="mono">${esc(sel.model)}</span> ${models.override ? pill("warning", "manual") : pill("good", "automático")}`],
+    ["Modelo", `<span class="mono">${esc(sel.model)}</span> ${models.activeIsRemote ? pill("neutral", "motor local") : models.override ? pill("warning", "manual") : pill("good", "automático")}`],
+    ...(models.activeIsRemote ? [["Modelo activo (API)", `<span class="mono">${esc(models.active)}</span> ${pill("warning", "remoto")}`] as [string, string]] : []),
     ["Cuantización", esc(sel.quantization)],
     ["Contexto (num_ctx)", `${sel.numCtx.toLocaleString("es-MX")} tokens por petición`],
     ["Peticiones en paralelo", `${sel.numParallel} (OLLAMA_NUM_PARALLEL)`],
@@ -73,8 +74,11 @@ function layout(p: HardwareProfile, models: ModelsInfo): string {
       gb(m.sizeBytes, 2),
       modelButton(m.name, models.override === m.name),
     ]),
+    ...(models.remote ?? []).flatMap((g) => g.models.map((full) => [
+      `<span class="mono">${esc(full)}</span> ${pill("neutral", "API")}`, "—", modelButton(full, models.override === full),
+    ])),
   ];
-  const picker = `<p class="muted small">Modelo que reciben las peticiones con <span class="mono">"model": "default"</span>, <span class="mono">"local"</span> o un alias (gpt-4o…). Si una app pide un modelo instalado concreto, se respeta.</p>
+  const picker = `<p class="muted small">Modelo que reciben las peticiones con <span class="mono">"model": "default"</span>, <span class="mono">"local"</span> o un alias (gpt-4o…), local o de una API. Las APIs se configuran en <a href="#/modelos">Modelos y APIs</a>.</p>
     ${table([{ label: "Modelo" }, { label: "Tamaño", num: true }, { label: "" }], modelRows)}
     ${models.lastUsed && models.lastUsed !== models.active ? `<p class="small">${pill("warning", "Aviso")} La última petición usó <span class="mono">${esc(models.lastUsed)}</span> porque la app lo pidió por nombre.</p>` : ""}`;
 

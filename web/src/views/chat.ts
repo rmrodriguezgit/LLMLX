@@ -608,7 +608,7 @@ function wire(el: HTMLElement): void {
 async function loadModels(): Promise<void> {
   try {
     const info = await api.models();
-    state.models = info.installed.map((m) => m.name);
+    state.models = [...info.installed.map((m) => m.name), ...(info.remote ?? []).flatMap((g) => g.models)];
     state.activeModel = info.active;
     if (state.prefs.model && !state.models.includes(state.prefs.model)) { state.prefs.model = null; savePrefs(state.prefs); }
   } catch { /* gateway offline: the send will surface the error */ }
@@ -616,7 +616,7 @@ async function loadModels(): Promise<void> {
 
 export const chatView: View = {
   title: "Chat",
-  subtitle: "Conversa con el modelo local",
+  subtitle: "Conversa con el modelo activo (local o API)",
   refreshMs: 0,
   persistent: true,
   async render(el) {

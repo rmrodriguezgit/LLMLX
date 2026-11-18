@@ -1,6 +1,19 @@
 import type {
-  Health, HardwareProfile, MemoryInfo, Metrics, ModelsInfo, SyncReport, Timeseries, UpdaterStatus,
+  Health, HardwareProfile, MemoryInfo, Metrics, ModelsInfo, ProviderInput, ProvidersInfo, SyncReport, Timeseries, UpdaterStatus,
 } from "./types";
+
+type Result = { ok: boolean; detail: string };
+
+async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json", "X-Client-App": "localllm-dashboard" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = (await res.json()) as T & { detail?: string };
+  if (!res.ok) throw new Error(data.detail ?? `${path} → HTTP ${res.status}`);
+  return data;
+}
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { "X-Client-App": "localllm-dashboard" }, cache: "no-store" });
@@ -28,5 +41,9 @@ export const api = {
   models: () => getJSON<ModelsInfo>("/v1/system/models"),
   gitStatus: () => getJSON<UpdaterStatus>("/v1/system/git-status"),
   gitSync: () => postJSON<SyncReport>("/v1/system/git-sync"),
-  setModel: (model: string | null) => postJSON<{ ok: boolean; detail: string }>("/v1/system/model", { model }),
+  setModel: (model: string | null) => postJSON<Result>("/v1/system/model", { model }),
+  providers: () => getJSON<ProvidersInfo>("/v1/system/providers"),
+  saveProvider: (p: ProviderInput) => send<Result>("POST", "/v1/system/providers", p),
+  deleteProvider: (id: string) => send<Result>("DELETE", `/v1/system/providers/${encodeURIComponent(id)}`),
+  discoverModels: (id: string) => send<Result & { models: string[] }>("GET", `/v1/system/providers/${encodeURIComponent(id)}/models`),
 };

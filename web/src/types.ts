@@ -188,8 +188,13 @@ export interface HardwareProfile {
   summary: string;
 }
 
+export interface RemoteGroup { provider: string; name: string; hasKey: boolean; models: string[] }
+
 export interface ModelsInfo {
   active: string;
+  activeIsRemote: boolean;
+  localModel: string;
+  remote: RemoteGroup[];
   auto: string;
   override: string | null;
   installed: { name: string; sizeBytes: number }[];
@@ -236,4 +241,28 @@ export interface Health {
   engine: string;
   model: string;
   breakerOpen: boolean;
+}
+
+export interface Provider {
+  id: string;
+  name: string;
+  baseURL: string;
+  models: string[];
+  enabled: boolean;
+  hasKey: boolean;
+  keyHint: string | null;
+  apiKeyEnv: string | null;
+  headers: string[];
+}
+
+export interface ProvidersInfo { providers: Provider[]; active: string }
+
+export interface ProviderInput {
+  id: string;
+  name: string;
+  baseURL: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
+  models: string[];
+  enabled: boolean;
 }

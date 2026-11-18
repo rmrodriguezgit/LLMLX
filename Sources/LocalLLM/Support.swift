@@ -99,6 +99,8 @@ enum AppPaths {
     static var ollamaPidFile: URL { appSupport.appendingPathComponent("ollama.pid.json") }
     static var updaterState: URL { appSupport.appendingPathComponent("updater-state.json") }
     static var modelOverride: URL { appSupport.appendingPathComponent("model-override.json") }
+    /// Remote API providers and their keys (local only, never Git-synced).
+    static var providers: URL { appSupport.appendingPathComponent("providers.json") }
 
     /// Dashboard static files: Git-synced repo first (updates without recompiling), then the app bundle.
     static var webRoot: URL? {

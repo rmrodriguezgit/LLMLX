@@ -5,6 +5,7 @@ import { esc } from "./format";
 import { errorBox, pill } from "./ui";
 import { memoryView } from "./views/memory";
 import { metricsView } from "./views/metrics";
+import { modelsView } from "./views/models";
 import { profileView } from "./views/profile";
 import { systemView } from "./views/system";
 import type { View } from "./views/view";
@@ -13,10 +14,11 @@ const ROUTES: Record<string, { view: View; icon: string; label: string }> = {
   chat: { view: chatView, label: "Chat", icon: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>' },
   metricas: { view: metricsView, label: "Métricas", icon: '<path d="M4 19V10M10 19V5M16 19v-7M22 19H2"/>' },
   memoria: { view: memoryView, label: "Memoria", icon: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10v4M11 10v4M15 10v4M19 10v4"/>' },
+  modelos: { view: modelsView, label: "Modelos y APIs", icon: '<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M5 19l3-3M16 8l3-3"/>' },
   perfil: { view: profileView, label: "Perfil de hardware", icon: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>' },
   sistema: { view: systemView, label: "Actualizaciones", icon: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>' },
 };
-const ALIASES: Record<string, string> = { conversaciones: "chat", metrics: "metricas", profile: "perfil", memory: "memoria", system: "sistema" };
+const ALIASES: Record<string, string> = { conversaciones: "chat", metrics: "metricas", profile: "perfil", memory: "memoria", system: "sistema", models: "modelos", apis: "modelos" };
 
 const app = document.getElementById("app")!;
 let timer: number | undefined;
