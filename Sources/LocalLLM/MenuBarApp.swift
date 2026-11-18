@@ -61,7 +61,7 @@ struct LocalLLMApp: App {
         MenuBarExtra {
             MenuContentView().environmentObject(state)
         } label: {
-            Image(systemName: state.snapshot.breakerOpen ? "exclamationmark.triangle.fill" : (state.snapshot.inFlight > 0 ? "cpu.fill" : "cpu"))
+            Image(systemName: state.snapshot.breakerOpen ? "exclamationmark.triangle.fill" : (state.snapshot.busy ? "cpu.fill" : "cpu"))
         }
         .menuBarExtraStyle(.window)
     }
@@ -115,6 +115,11 @@ struct UISnapshot {
     var inFlight = 0
     var queued = 0
     var capacity = 0
+    /// Local or remote work in progress (drives the menu bar icon).
+    var busy = false
+    /// "Uso de …": whose numbers the stats grid shows (always the active provider).
+    var statsTitle = ""
+    var errors = 0
     var sessionRequests = 0
     var totalRequests = 0
     var totalPromptTokens = 0
@@ -166,7 +171,6 @@ final class AppState: ObservableObject {
         let mem = app.memory.snapshot
         let loaded = app.ollama.loadedModels
         let a = app.admission.stats
-        let all = app.tracker.allTimeStats
         let live = app.tracker.liveStats
         let git = app.updater.status
         let cfg = app.config.current
@@ -205,15 +209,29 @@ final class AppState: ObservableObject {
         s.swapBytes = mem.swapUsedBytes
         s.pressure = mem.pressure
         s.breakerOpen = mem.breakerOpen
-        s.inFlight = a.inFlight
-        s.queued = a.queued
-        s.capacity = a.capacity
-        s.sessionRequests = live.requests
-        s.totalRequests = all.requests
-        s.totalPromptTokens = all.promptTokens
-        s.totalCompletionTokens = all.completionTokens
-        s.lastTokS = live.lastTokensPerSec
-        s.lastTtft = live.lastTtftMs
+        // The stats grid follows the active provider: an API's own requests, tokens and speed,
+        // or the local engine's queue and numbers.
+        let pid = s.activeProviderId ?? "local"
+        let ps = app.tracker.providerStats(pid)
+        if let id = s.activeProviderId {
+            s.inFlight = app.tracker.remoteInFlight(id)
+            s.queued = 0
+            s.capacity = 0
+            s.statsTitle = "Uso de \(s.providers.first { $0.id == id }?.name ?? id)"
+        } else {
+            s.inFlight = a.inFlight
+            s.queued = a.queued
+            s.capacity = a.capacity
+            s.statsTitle = "Uso del motor local (Ollama)"
+        }
+        s.busy = a.inFlight > 0 || s.providers.contains { app.tracker.remoteInFlight($0.id) > 0 }
+        s.errors = ps.allTime.errors + ps.allTime.rejected
+        s.sessionRequests = ps.session.requests
+        s.totalRequests = ps.allTime.requests
+        s.totalPromptTokens = ps.allTime.promptTokens
+        s.totalCompletionTokens = ps.allTime.completionTokens
+        s.lastTokS = ps.session.lastTokensPerSec ?? ps.allTime.lastTokensPerSec
+        s.lastTtft = ps.session.lastTtftMs ?? ps.allTime.lastTtftMs
         s.gitState = git.state
         s.gitCommit = git.headCommit.map { String($0.prefix(8)) } ?? "—"
         s.gitSubject = git.headSubject ?? ""
@@ -325,10 +343,17 @@ struct MenuContentView: View {
 
             MemoryBar(snapshot: s)
 
+            Text(s.statsTitle).font(.caption2.bold()).foregroundStyle(.secondary)
+                .padding(.bottom, -6)
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
                 GridRow {
-                    stat("Activas", "\(s.inFlight)/\(s.capacity)")
-                    stat("En cola", "\(s.queued)")
+                    if s.activeIsRemote {
+                        stat("Activas", "\(s.inFlight)")
+                        stat("Errores", "\(s.errors)")
+                    } else {
+                        stat("Activas", "\(s.inFlight)/\(s.capacity)")
+                        stat("En cola", "\(s.queued)")
+                    }
                     stat("tok/s", s.lastTokS.map { String(format: "%.1f", $0) } ?? "—")
                 }
                 GridRow {

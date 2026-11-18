@@ -62,6 +62,12 @@ final class AppCoordinator {
         memory = MemoryMonitor(config: config.current.memoryGuard)
         let isHealthCheck = CommandLine.arguments.contains("--health-check")
         tracker = TokenTracker(readOnly: isHealthCheck)
+        // "localia/qwen…" → "localia" when that provider exists; anything else is the local engine.
+        tracker.configureProviders { [providers] label in
+            guard let slash = label.firstIndex(of: "/") else { return "local" }
+            let id = String(label[..<slash])
+            return providers.current.providers.contains { $0.id == id && !$0.isLocal } ? id : "local"
+        }
         admission = AdmissionController(capacity: p.numParallel, maxQueue: config.current.gateway.maxQueueDepth)
         ollama = OllamaProcessManager(plan: p, config: config.current.ollama)
         gateway = InferenceGateway(app: self)

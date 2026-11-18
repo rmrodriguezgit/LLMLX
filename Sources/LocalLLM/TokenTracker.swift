@@ -121,6 +121,13 @@ final class TokenTracker {
     private var insertStmt: OpaquePointer?
     private let live = Locked(LiveTokenStats())
     private let allTime = Locked(LiveTokenStats())
+    /// Same counters split by provider ("local" = Ollama on this Mac, else the provider id).
+    private let providerLive = Locked<[String: LiveTokenStats]>([:])
+    private let providerAllTime = Locked<[String: LiveTokenStats]>([:])
+    /// Remote requests in progress per provider (they skip the local admission queue).
+    private let remoteActive = Locked<[String: Int]>([:])
+    /// Telemetry model label ("localia/qwen2.5-coder:14b", "qwen3:8b") → provider id.
+    private let providerKey = Locked<(String) -> String>({ _ in "local" })
 
     init(path: URL = AppPaths.database, readOnly: Bool = false) {
         do {
@@ -184,6 +191,59 @@ final class TokenTracker {
     var liveStats: LiveTokenStats { live.get() }
     var allTimeStats: LiveTokenStats { allTime.get() }
 
+    // MARK: Per provider
+
+    /// Installs the label → provider mapping and rebuilds the all-time per-provider counters
+    /// from the history, so the menu shows the active provider's numbers right after launch.
+    func configureProviders(key: @escaping (String) -> String) {
+        providerKey.set(key)
+        let rows: ([[String: Any]], [[String: Any]]) = readQueue.sync {
+            guard let db = reader else { return ([], []) }
+            let totals = db.query("""
+                SELECT model, COUNT(*) AS n, COALESCE(SUM(prompt_tokens),0) AS p, COALESCE(SUM(completion_tokens),0) AS c,
+                       SUM(CASE WHEN status IN (429,503) THEN 1 ELSE 0 END) AS rej,
+                       SUM(CASE WHEN status NOT BETWEEN 200 AND 299 AND status NOT IN (429,503) THEN 1 ELSE 0 END) AS err
+                FROM requests GROUP BY model
+                """)
+            // SQLite returns the bare columns of the MAX(ts) row: the latest successful measurement per model.
+            let last = db.query("""
+                SELECT model, MAX(ts) AS ts, tokens_per_sec, ttft_ms FROM requests
+                WHERE status BETWEEN 200 AND 299 AND tokens_per_sec IS NOT NULL GROUP BY model
+                """)
+            return (totals, last)
+        }
+        var table: [String: LiveTokenStats] = [:]
+        var lastTs: [String: Double] = [:]
+        for row in rows.0 {
+            let id = key(row["model"] as? String ?? "")
+            var s = table[id] ?? LiveTokenStats()
+            s.requests += JSON.int(row["n"]) ?? 0
+            s.promptTokens += JSON.int(row["p"]) ?? 0
+            s.completionTokens += JSON.int(row["c"]) ?? 0
+            s.rejected += JSON.int(row["rej"]) ?? 0
+            s.errors += JSON.int(row["err"]) ?? 0
+            table[id] = s
+        }
+        for row in rows.1 {
+            let model = row["model"] as? String ?? ""
+            let id = key(model), ts = JSON.double(row["ts"]) ?? 0
+            guard ts >= lastTs[id] ?? 0 else { continue }
+            lastTs[id] = ts
+            table[id, default: LiveTokenStats()].lastTokensPerSec = JSON.double(row["tokens_per_sec"])
+            table[id, default: LiveTokenStats()].lastTtftMs = JSON.double(row["ttft_ms"])
+            table[id, default: LiveTokenStats()].lastModel = model
+        }
+        providerAllTime.set(table)
+    }
+
+    func providerStats(_ id: String) -> (session: LiveTokenStats, allTime: LiveTokenStats) {
+        (providerLive.get()[id] ?? LiveTokenStats(), providerAllTime.get()[id] ?? LiveTokenStats())
+    }
+
+    func remoteBegan(_ id: String) { remoteActive.mutate { $0[id, default: 0] += 1 } }
+    func remoteEnded(_ id: String) { remoteActive.mutate { $0[id] = max(0, ($0[id] ?? 1) - 1) } }
+    func remoteInFlight(_ id: String) -> Int { remoteActive.get()[id] ?? 0 }
+
     func record(_ r: RequestRecord) {
         let ok = (200..<300).contains(r.status)
         let update: (inout LiveTokenStats) -> Void = { s in
@@ -198,6 +258,9 @@ final class TokenTracker {
         }
         live.mutate(update)
         allTime.mutate(update)
+        let id = providerKey.get()(r.model)
+        providerLive.mutate { update(&$0[id, default: LiveTokenStats()]) }
+        providerAllTime.mutate { update(&$0[id, default: LiveTokenStats()]) }
 
         writeQueue.async { [weak self] in
             guard let self, let stmt = self.insertStmt else { return }
