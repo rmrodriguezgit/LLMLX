@@ -236,4 +236,38 @@ export interface Health {
   engine: string;
   model: string;
   breakerOpen: boolean;
+  defaultProvider?: string;
 }
+
+export type ProviderKind = "ollama" | "openai" | "anthropic";
+
+export interface ProviderInfo {
+  id: string;
+  type: ProviderKind;
+  name: string;
+  enabled: boolean;
+  baseUrl?: string;
+  defaultModel?: string;
+  models?: string[];
+  headers?: Record<string, string>;
+  caCertPath?: string;
+  allowInsecureTLS?: boolean;
+  timeoutSeconds?: number;
+  maxTokens?: number;
+  refusalFallbacks?: boolean;
+  hasApiKey?: boolean;
+  apiKeyHint?: string;
+  offeredModels?: string[];
+  /** Write-only fields sent on save. */
+  apiKey?: string;
+  clearApiKey?: boolean;
+}
+
+export interface ProvidersInfo {
+  path: string;
+  defaultProvider: string;
+  providers: ProviderInfo[];
+  error: string | null;
+}
+
+export interface ProviderTest { ok: boolean; status: number; models: string[]; detail: string }

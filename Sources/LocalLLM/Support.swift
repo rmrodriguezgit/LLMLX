@@ -99,6 +99,11 @@ enum AppPaths {
     static var ollamaPidFile: URL { appSupport.appendingPathComponent("ollama.pid.json") }
     static var updaterState: URL { appSupport.appendingPathComponent("updater-state.json") }
     static var modelOverride: URL { appSupport.appendingPathComponent("model-override.json") }
+    /// LLM providers (local Ollama, LocalIA, OpenAI, Claude…). Local to this Mac, holds API keys.
+    static var providers: URL {
+        if let p = env("LOCALLLM_PROVIDERS_FILE") { return URL(fileURLWithPath: p) }
+        return appSupport.appendingPathComponent("providers.json")
+    }
 
     /// Dashboard static files: Git-synced repo first (updates without recompiling), then the app bundle.
     static var webRoot: URL? {

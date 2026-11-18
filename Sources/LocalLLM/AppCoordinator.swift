@@ -7,6 +7,8 @@ final class AppCoordinator {
     static let shared = AppCoordinator()
 
     let config = ConfigStore()
+    /// Local + remote LLM providers (providers.json, hot-reloaded; editable from the dashboard).
+    let providers = ProviderStore()
     let hardware: HardwareInfo
     private let planBox: Locked<ModelPlan>
     let memory: MemoryMonitor
@@ -155,6 +157,11 @@ final class AppCoordinator {
             if installed[req] != nil || installed[req + ":latest"] != nil { return req }
         }
         return auto
+    }
+
+    /// Local Ollama model or a remote provider (Claude, ChatGPT, LocalIA…) for a requested model name.
+    func route(_ requested: String?) -> ModelRoute {
+        providers.route(requested, aliases: config.current.routing.aliases, local: { self.resolveModel($0) })
     }
 
     // MARK: Manual model selection
@@ -312,6 +319,7 @@ final class AppCoordinator {
             "engine": ollama.status.label,
             "model": plan.model,
             "breakerOpen": memory.isBreakerOpen,
+            "defaultProvider": providers.current.defaultProvider,
             "displayVersion": AppEnvironment.displayVersion
         ]
     }

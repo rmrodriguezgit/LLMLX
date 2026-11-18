@@ -54,6 +54,8 @@ const state = {
   filter: "",
   models: [] as string[],
   activeModel: "",
+  /** Remote providers: [provider name, ["<id>/<model>", …]]. */
+  remote: [] as [string, string[]][],
   live: null as Live | null,
   listOpen: false,
   /** Models that rejected `think`: never send it to them again this session. */
@@ -375,8 +377,12 @@ function modelOptions(): string {
   const sel = state.prefs.model;
   const opts = [`<option value="" ${sel === null ? "selected" : ""}>Automático · ${esc(state.activeModel || "modelo activo")}</option>`];
   const names = new Set(state.models);
-  if (sel && !names.has(sel)) names.add(sel);
-  for (const n of names) opts.push(`<option value="${esc(n)}" ${n === sel ? "selected" : ""}>${esc(n)}</option>`);
+  const remote = new Set(state.remote.flatMap(([, ms]) => ms));
+  if (sel && !names.has(sel) && !remote.has(sel)) names.add(sel);
+  const opt = (n: string): string => `<option value="${esc(n)}" ${n === sel ? "selected" : ""}>${esc(n)}</option>`;
+  if (state.remote.length) opts.push(`<optgroup label="Este Mac (Ollama)">${[...names].map(opt).join("")}</optgroup>`);
+  else for (const n of names) opts.push(opt(n));
+  for (const [label, ms] of state.remote) opts.push(`<optgroup label="${esc(label)}">${ms.map(opt).join("")}</optgroup>`);
   return opts.join("");
 }
 
@@ -607,16 +613,22 @@ function wire(el: HTMLElement): void {
 
 async function loadModels(): Promise<void> {
   try {
-    const info = await api.models();
+    const [info, prov] = await Promise.all([api.models(), api.providers().catch(() => null)]);
     state.models = info.installed.map((m) => m.name);
     state.activeModel = info.active;
-    if (state.prefs.model && !state.models.includes(state.prefs.model)) { state.prefs.model = null; savePrefs(state.prefs); }
+    state.remote = (prov?.providers ?? [])
+      .filter((p) => p.enabled && p.type !== "ollama" && (p.offeredModels ?? []).length)
+      .map((p) => [p.name, (p.offeredModels ?? []).map((m) => `${p.id}/${m}`)]);
+    const def = prov?.providers.find((p) => p.id === prov.defaultProvider && p.type !== "ollama");
+    if (def) state.activeModel = `${def.id}/${def.defaultModel ?? ""}`;
+    const known = [...state.models, ...state.remote.flatMap(([, ms]) => ms)];
+    if (state.prefs.model && !known.includes(state.prefs.model)) { state.prefs.model = null; savePrefs(state.prefs); }
   } catch { /* gateway offline: the send will surface the error */ }
 }
 
 export const chatView: View = {
   title: "Chat",
-  subtitle: "Conversa con el modelo local",
+  subtitle: "Conversa con el modelo local o con un proveedor configurado",
   refreshMs: 0,
   persistent: true,
   async render(el) {
