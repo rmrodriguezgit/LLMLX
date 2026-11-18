@@ -275,27 +275,30 @@ final class GitAutoUpdater {
         let built = AppPaths.buildScratch.appendingPathComponent("arm64-apple-macosx/release/LocalLLM")
         let fallbackBuilt = AppPaths.buildScratch.appendingPathComponent("release/LocalLLM")
         let source = FileManager.default.fileExists(atPath: built.path) ? built : fallbackBuilt
-        let candidate = AppPaths.binDir.appendingPathComponent("LocalLLM-\(target.prefix(12))")
-        try? FileManager.default.removeItem(at: candidate)
-        do { try FileManager.default.copyItem(at: source, to: candidate) } catch {
-            await rollback(to: previous, reason: "cannot stage binary: \(error.localizedDescription)", bad: target)
+        // Same versioning scheme as build_dmg.sh: 1.0.<number of commits>.
+        let count = (await git(["rev-list", "--count", "HEAD"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newVersion: String? = Int(count).map { "1.0.\($0)" }
+
+        // Staged as an .app bundle: it is later opened through LaunchServices so the menu bar icon shows.
+        let candidateBundle = AppPaths.binDir.appendingPathComponent("LocalLLM-\(target.prefix(12)).app")
+        let candidate: URL
+        do {
+            candidate = try BundleLauncher.makeBundle(binary: source, at: candidateBundle,
+                                                      baseBundle: AppEnvironment.appBundleURL, version: newVersion)
+        } catch {
+            await rollback(to: previous, reason: "cannot stage bundle: \(error.localizedDescription)", bad: target)
             report.outcome = "rolled-back"; report.detail = "staging failed"
             return report
         }
-        _ = await ProcessRunner.run("/usr/bin/codesign", ["--force", "--sign", "-", candidate.path], timeout: 60)
 
         // Health-check the candidate on an ephemeral port within the configured timeout.
         update { $0.state = "health-check" }
         guard await healthCheck(candidate, timeout: cfg.healthCheckTimeoutSeconds) else {
-            try? FileManager.default.removeItem(at: candidate)
+            try? FileManager.default.removeItem(at: candidateBundle)
             await rollback(to: previous, reason: "candidate failed health-check within \(Int(cfg.healthCheckTimeoutSeconds))s", bad: target)
             report.outcome = "rolled-back"; report.detail = "health-check failed"
             return report
         }
-
-        // Same versioning scheme as build_dmg.sh: 1.0.<number of commits>.
-        let count = (await git(["rev-list", "--count", "HEAD"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        let newVersion: String? = Int(count).map { "1.0.\($0)" }
 
         // Atomic swap of bin/current (symlink rename is atomic on APFS).
         let tmpLink = AppPaths.binDir.appendingPathComponent("current.tmp")
