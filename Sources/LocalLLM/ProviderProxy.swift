@@ -636,6 +636,8 @@ extension InferenceGateway {
         let client = InferenceGateway.clientApp(req.headers)
         let stream = (json["stream"] as? Bool) ?? kind.defaultStream
         let label = "\(p.id)/\(model)"
+        app.tracker.remoteBegan(p.id)
+        defer { app.tracker.remoteEnded(p.id) }
         var record = RequestRecord(clientApp: client, endpoint: kind.rawValue, model: label, stream: stream, priority: "remote")
         let extra = cors + [("X-LocalLLM-Model", label), ("X-LocalLLM-Provider", p.id), ("X-LocalLLM-Queue-Ms", "0.0")]
 
