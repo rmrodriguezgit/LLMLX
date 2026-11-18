@@ -312,13 +312,13 @@ struct MenuContentView: View {
             ProviderPicker(snapshot: s)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(s.activeIsRemote ? "Motor local: \(s.engine) — solo atiende a apps que pidan un modelo local" : "Motor local: \(s.engine)")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(s.activeIsRemote ? "Motor local en espera (solo para apps que lo pidan)" : "Motor local: \(s.engine)")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 if !s.activeIsRemote {
                     Text(s.loadedLine).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 if let last = s.lastUsedModel, last != s.model {
-                    Text("Última petición usó: \(last) (la app lo pidió por nombre)").font(.caption).foregroundStyle(.orange)
+                    Text("Última petición usó: \(last)").font(.caption).foregroundStyle(.orange).lineLimit(1).truncationMode(.middle)
                 }
                 Text(s.profileLine).font(.caption2).foregroundStyle(.secondary)
             }
@@ -397,6 +397,8 @@ struct MenuContentView: View {
         }
         .padding(14)
         .frame(width: 360)
+        // The window takes the content's full height, so wrapped lines never get drawn on top of each other.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func stat(_ title: String, _ value: String) -> some View {
@@ -470,13 +472,12 @@ struct ProviderPicker: View {
                 }
             }
 
-            Text(s.activeIsRemote
-                 ? "Tus apps reciben respuestas de \(current?.name ?? "la API") · modelo \(s.activeModelShort), a través de LocalLLM y por la red."
-                 : "Tus apps reciben respuestas de \(s.activeModelShort), que corre en este Mac sin internet.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(s.activeIsRemote ? "Tus apps usan este proveedor por la red." : "Tus apps usan este Mac, sin internet.")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             if let err = state.actionError ?? s.providersError {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    .font(.caption).foregroundStyle(.orange).lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .help("Lo usan todas las apps que piden \"default\", \"local\" o un alias (gpt-4o…) en \(s.gatewayURL). Los proveedores se configuran en Admin → Proveedores LLM.")
