@@ -220,6 +220,21 @@ final class ProviderStore: @unchecked Sendable {
         return final
     }
 
+    /// Makes `id` the provider that answers "default" and the aliases; for an API, `model` also
+    /// becomes its default model. Used by the menu bar picker (the dashboard uses `replace`).
+    @discardableResult
+    func select(provider id: String, model: String? = nil) throws -> ProvidersFile {
+        var f = current
+        guard let i = f.providers.firstIndex(where: { $0.id == id }) else { throw ProviderError.invalid("proveedor \(id) no encontrado") }
+        guard f.providers[i].enabled else { throw ProviderError.invalid("\(f.providers[i].name) está desactivado; actívalo en Admin") }
+        if let m = model, !m.isEmpty, !f.providers[i].isLocal { f.providers[i].defaultModel = m }
+        f.defaultProvider = id
+        try ProviderStore.validate(f)
+        try write(f)
+        _ = current
+        return f
+    }
+
     /// Builds the provider to test from a draft (unsaved form) or a stored id.
     func draft(from body: [String: Any]) throws -> ProviderConfig {
         if let raw = body["provider"] as? [String: Any] {

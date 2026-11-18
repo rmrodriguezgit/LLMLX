@@ -63,7 +63,7 @@ Normalmente basta con `git push` a este repo. La app instalada revisa GitHub cad
 
 ### Panel web (chat, métricas, memoria, perfil)
 
-Ábrelo en `http://127.0.0.1:11500/dashboard/`, o con los botones **Chat / Métricas / Memoria / Perfil** del menú. Es una app TypeScript sin dependencias en tiempo de ejecución, con tema claro y oscuro:
+Ábrelo en `http://127.0.0.1:11500/dashboard/`, o con el botón **Admin** del menú. Es una app TypeScript sin dependencias en tiempo de ejecución, con tema claro y oscuro:
 
 | Sección | Qué muestra |
 |---|---|
@@ -81,9 +81,16 @@ cd web && npm install && npm run build   # typecheck + bundle → web/dist (se c
 
 Tras un `git push`, la app instalada sirve el panel nuevo desde su clon del repo, sin recompilar nada.
 
-### Elegir modelo
+### Elegir proveedor y modelo
 
-Desde el menú (clic en el nombre del modelo) o desde **Perfil de hardware → Elegir modelo**:
+En el menú de la barra, el bloque **Proveedor de LLM** tiene dos selectores:
+
+- **Proveedor**: *Local en este Mac (Ollama) · predeterminado* o cualquier API habilitada en **Admin → Proveedores LLM** (LocalIA, ChatGPT, Claude…). Es lo que reciben todas las apps que piden `"default"`, `"local"` o un alias.
+- **Modelo**: los modelos de Ollama (con **Automático**) o los modelos de la API elegida (pasa a ser su modelo predeterminado).
+
+Debajo, una frase indica qué está usando ahora cada app. El menú escribe el mismo `providers.json` que Admin, y los cambios hechos en Admin aparecen en el menú en un segundo. Para añadir o editar proveedores usa *Proveedor → Añadir o editar proveedores…* o el botón **Admin**.
+
+Para el modelo local también puedes usar **Perfil de hardware → Elegir modelo**:
 
 - **Automático**: usa el modelo que el profiler elige para tu Mac (`qwen3:8b` en 16 GB).
 - **Cualquier modelo instalado**: pasa a ser el destino de `"model": "default"`, `"local"` y de los alias (`gpt-4o`…). La elección se guarda y sobrevive a reinicios.
