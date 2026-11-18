@@ -12,12 +12,38 @@ enum Entry {
             let port = args.firstIndex(of: "--port").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } ?? 0
             runHeadless(.healthCheck(port: port))
         }
+        #if DEBUG
+        // Dev aid: renders the menu bar popover to a PNG (`--snapshot-menu out.png`) for UI review.
+        if let i = args.firstIndex(of: "--snapshot-menu"), args.indices.contains(i + 1) { snapshotMenu(to: args[i + 1]) }
+        #endif
         let headless = args.contains("--headless")
         if !headless { Launcher.redirectIfUpdated() }
         InstanceLock.acquireOrExit()
         if headless { runHeadless(.headless) }
         LocalLLMApp.main()
     }
+
+    #if DEBUG
+    private static func snapshotMenu(to path: String) -> Never {
+        Task { await AppCoordinator.shared.start(mode: .headless) }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            do {
+                AppState.shared.refresh()
+                let view = MenuContentView().environmentObject(AppState.shared).background(Color(nsColor: .windowBackgroundColor))
+                let r = ImageRenderer(content: view)
+                r.scale = 2
+                if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+                Task { await AppCoordinator.shared.shutdown(handoff: false); exit(0) }
+            }
+        }
+        NSApplication.shared.run()
+        exit(0)
+    }
+    #endif
 
     private static func runHeadless(_ mode: RunMode) -> Never {
         Task { await AppCoordinator.shared.start(mode: mode) }
@@ -64,6 +90,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - UI state
 
+struct ProviderOption: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let usable: Bool
+    let models: [String]
+}
+
 struct UISnapshot {
     var hardwareLine = "Detectando hardware…"
     var gpuLine = ""
@@ -98,6 +131,14 @@ struct UISnapshot {
     var autoModel = ""
     var modelOverride: String?
     var installedModels: [String] = []
+    /// Enabled remote APIs, as configured in the admin panel (re-read every refresh).
+    var providers: [ProviderOption] = []
+    var activeIsRemote = false
+    /// nil = local engine (Ollama).
+    var activeProviderId: String?
+    /// Model shown in the "Modelo" picker: bare remote name or local model.
+    var activeModelShort = "—"
+    var providersError: String?
     var loadedLine = ""
     var lastUsedModel: String?
     var displayVersion = ""
@@ -134,7 +175,24 @@ final class AppState: ObservableObject {
         s.hardwareLine = hw.summary
         s.gpuLine = "\(hw.performanceCores)P + \(hw.efficiencyCores)E CPU • \(hw.gpuCores.map { "\($0)-core GPU" } ?? "GPU")"
         s.profileLine = "\(plan.profileId) • ctx \(plan.numCtx) • ×\(plan.numParallel) • KV \(plan.kvCacheType)"
-        s.model = plan.model
+        // providers.json is re-read when it changes, so edits in Admin show up here within a second.
+        let pf = app.providers.current
+        s.providers = pf.providers.filter { $0.enabled && !$0.isLocal }.map {
+            ProviderOption(id: $0.id, name: $0.name, usable: $0.hasKey || ProviderPicker.isOnThisMac($0.resolvedBaseURL),
+                           models: $0.offeredModels)
+        }
+        s.providersError = app.providers.loadError
+        if let p = pf.providers.first(where: { $0.id == pf.defaultProvider && $0.enabled && !$0.isLocal }) {
+            s.activeProviderId = p.id
+            s.activeIsRemote = true
+            s.activeModelShort = (p.defaultModel ?? "").isEmpty ? (p.offeredModels.first ?? "—") : p.defaultModel!
+            s.model = "\(p.id)/\(s.activeModelShort)"
+        } else {
+            s.activeProviderId = nil
+            s.activeIsRemote = false
+            s.activeModelShort = plan.model
+            s.model = plan.model
+        }
         s.engine = app.ollama.status.label
         s.totalBytes = max(1, mem.totalBytes)
         s.weightsBytes = loaded.reduce(0) { $0 + $1.weightsBytes }
@@ -176,6 +234,32 @@ final class AppState: ObservableObject {
         s.displayVersion = "LocalLLM \(AppEnvironment.displayVersion)"
         s.gatewayURL = "http://\(cfg.gateway.host):\(app.gateway.boundPort == 0 ? cfg.gateway.port : app.gateway.boundPort)"
         snapshot = s
+    }
+
+    /// Makes `id` the provider that answers "default" / aliases ("local" = Ollama on this Mac).
+    /// `model` also becomes that API's default model. Written to providers.json, same as Admin.
+    func selectProvider(_ id: String, model: String? = nil) {
+        do {
+            try AppCoordinator.shared.providers.select(provider: id, model: model)
+            AppCoordinator.shared.tracker.incident("provider-selected", "menu: \(id)\(model.map { "/" + $0 } ?? "")")
+            actionError = nil
+        } catch {
+            actionError = error.localizedDescription
+        }
+        refresh()
+    }
+
+    /// Local model: switches the provider to "local" and picks the Ollama model (nil = automatic).
+    func selectLocalModel(_ model: String?) {
+        if snapshot.activeIsRemote { selectProvider("local") }
+        selectModel(model)
+    }
+
+    @Published var actionError: String?
+
+    func openAdmin(_ route: String = "") {
+        let base = snapshot.gatewayURL.isEmpty ? "http://127.0.0.1:11500" : snapshot.gatewayURL
+        if let url = URL(string: base + "/dashboard/" + (route.isEmpty ? "" : "#/" + route)) { NSWorkspace.shared.open(url) }
     }
 
     func selectModel(_ model: String?) {
@@ -225,33 +309,16 @@ struct MenuContentView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Image(systemName: "brain")
-                    Menu {
-                        Button("Automático (\(s.autoModel))") { state.selectModel(nil) }
-                        Divider()
-                        ForEach(s.installedModels, id: \.self) { name in
-                            Button {
-                                state.selectModel(name)
-                            } label: {
-                                if s.modelOverride == name { Label(name, systemImage: "checkmark") } else { Text(name) }
-                            }
-                        }
-                    } label: {
-                        Text(s.model).font(.system(.body, design: .monospaced))
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("Modelo por defecto para las peticiones que piden \"default\", \"local\" o un alias (gpt-4o…). Si una app pide un modelo instalado concreto, se usa ese.")
-                    Text(s.modelOverride == nil ? "auto" : "manual")
-                        .font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Capsule().fill(Color.secondary.opacity(0.18)))
+            ProviderPicker(snapshot: s)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(s.activeIsRemote ? "Motor local: \(s.engine) — solo atiende a apps que pidan un modelo local" : "Motor local: \(s.engine)")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !s.activeIsRemote {
+                    Text(s.loadedLine).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                Text(s.engine).font(.caption).foregroundStyle(.secondary)
-                Text(s.loadedLine).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if let last = s.lastUsedModel, last != s.model {
-                    Text("Última petición usó: \(last)").font(.caption).foregroundStyle(.orange)
+                    Text("Última petición usó: \(last) (la app lo pidió por nombre)").font(.caption).foregroundStyle(.orange)
                 }
                 Text(s.profileLine).font(.caption2).foregroundStyle(.secondary)
             }
@@ -307,18 +374,13 @@ struct MenuContentView: View {
 
             Divider()
 
-            HStack {
-                Button("Copiar URL API") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(s.gatewayURL + "/v1", forType: .string)
-                }
-                Button("Chat") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/chat")!) }
-                Button("Métricas") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/metricas")!) }
-                Button("Memoria") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/memoria")!) }
-                Button("Perfil") { NSWorkspace.shared.open(URL(string: s.gatewayURL + "/dashboard/#/perfil")!) }
+            Button {
+                state.openAdmin()
+            } label: {
+                Label("Admin", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity)
             }
-            .buttonStyle(.link)
-            .font(.caption)
+            .controlSize(.large)
+            .help("Abre el panel de administración: proveedores LLM, chat, métricas, memoria, perfil y actualizaciones")
 
             HStack {
                 Toggle("Abrir al iniciar sesión", isOn: Binding(get: { state.launchAtLogin }, set: { _ in state.toggleLaunchAtLogin() }))
@@ -342,6 +404,99 @@ struct MenuContentView: View {
             Text(title).font(.caption2).foregroundStyle(.secondary)
             Text(value).font(.system(.callout, design: .monospaced))
         }
+    }
+}
+
+/// "Proveedor de LLM": which engine answers the apps that ask for "default" / "local" / an alias.
+struct ProviderPicker: View {
+    @EnvironmentObject var state: AppState
+    let snapshot: UISnapshot
+
+    private var current: ProviderOption? { snapshot.providers.first { $0.id == snapshot.activeProviderId } }
+
+    var body: some View {
+        let s = snapshot
+        VStack(alignment: .leading, spacing: 7) {
+            Text("PROVEEDOR DE LLM").font(.caption2.bold()).foregroundStyle(.secondary)
+
+            row("Proveedor") {
+                Menu {
+                    Button { state.selectProvider("local") } label: {
+                        check(s.activeProviderId == nil, "Local en este Mac (Ollama) · predeterminado")
+                    }
+                    if !s.providers.isEmpty {
+                        Section("APIs") {
+                            ForEach(s.providers) { p in
+                                Button { state.selectProvider(p.id) } label: {
+                                    check(s.activeProviderId == p.id,
+                                          p.name + (!p.usable ? " — sin API key" : ""))
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Añadir o editar proveedores…") { state.openAdmin("proveedores") }
+                } label: {
+                    Label(current?.name ?? "Local (Ollama)", systemImage: s.activeIsRemote ? "cloud" : "desktopcomputer")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+
+            row("Modelo") {
+                Menu {
+                    if let p = current {
+                        ForEach(p.models, id: \.self) { m in
+                            Button { state.selectProvider(p.id, model: m) } label: { check(s.activeModelShort == m, m) }
+                        }
+                    } else {
+                        Button { state.selectLocalModel(nil) } label: {
+                            check(s.modelOverride == nil, "Automático — el mejor para este Mac (\(s.autoModel))")
+                        }
+                        Divider()
+                        ForEach(s.installedModels, id: \.self) { m in
+                            Button { state.selectLocalModel(m) } label: { check(s.modelOverride == m, m) }
+                        }
+                    }
+                } label: {
+                    Text(s.activeModelShort).font(.system(.body, design: .monospaced))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                if !s.activeIsRemote {
+                    Text(s.modelOverride == nil ? "auto" : "manual")
+                        .font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.18)))
+                }
+            }
+
+            Text(s.activeIsRemote
+                 ? "Tus apps reciben respuestas de \(current?.name ?? "la API") · modelo \(s.activeModelShort), a través de LocalLLM y por la red."
+                 : "Tus apps reciben respuestas de \(s.activeModelShort), que corre en este Mac sin internet.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let err = state.actionError ?? s.providersError {
+                Label(err, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .help("Lo usan todas las apps que piden \"default\", \"local\" o un alias (gpt-4o…) en \(s.gatewayURL). Los proveedores se configuran en Admin → Proveedores LLM.")
+    }
+
+    static func isOnThisMac(_ url: URL?) -> Bool {
+        let h = url?.host ?? ""
+        return h == "127.0.0.1" || h == "localhost" || h == "::1"
+    }
+
+    private func row<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.caption).foregroundStyle(.secondary).frame(width: 64, alignment: .leading)
+            content()
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder private func check(_ on: Bool, _ text: String) -> some View {
+        if on { Label(text, systemImage: "checkmark") } else { Text(text) }
     }
 }
 
